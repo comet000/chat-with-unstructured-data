@@ -4,7 +4,9 @@ from snowflake.snowpark import Session
 from typing import List
 import json
 
-# Connection setup
+# ---------------------------------------------------------
+# Connection Setup
+# ---------------------------------------------------------
 connection_parameters = {
     "account": st.secrets["account"],
     "user": st.secrets["user"],
@@ -17,92 +19,78 @@ connection_parameters = {
 
 session = Session.builder.configs(connection_parameters).create()
 
-# -- Page Title --
-st.title("Chat with Cortex Search RAG")
+# ---------------------------------------------------------
+# Streamlit UI
+# ---------------------------------------------------------
+st.title("💬 Chat with Cortex Search RAG")
 
-# ------------------------------------------------------------------
-# Helper Functions for Cortex (SQL-based, works on Streamlit Cloud)
-# ------------------------------------------------------------------
-
+# ---------------------------------------------------------
+# Cortex Search Helper (✅ fixed syntax)
+# ---------------------------------------------------------
 def cortex_search_query(session, database, schema, service_name, query, columns=None, limit=5):
     """
     Query Cortex Search Service via SQL.
     Returns a list of result dictionaries.
     """
     query_escaped = query.replace("'", "''")
-    
-    # Build columns array if provided
+
+    # Build column array
     if columns:
         columns_array = "ARRAY_CONSTRUCT(" + ", ".join([f"'{c}'" for c in columns]) + ")"
     else:
-        columns_array = None
-    
-    # Build the SQL query
-    if columns_array:
-        sql = f"""
-            SELECT *
-            FROM TABLE(
-                {database}.{schema}.{service_name}.SEARCH(
-                    '{query_escaped}',
-                    {columns_array},
-                    {limit}
-                )
+        columns_array = "NULL"
+
+    # ✅ Correct syntax for Cortex Search
+    # Must not include database/schema prefix before the service name
+    sql = f"""
+        USE SCHEMA {database}.{schema};
+        SELECT * FROM TABLE(
+            {service_name}!SEARCH(
+                '{query_escaped}',
+                {columns_array},
+                {limit}
             )
-        """
-    else:
-        sql = f"""
-            SELECT *
-            FROM TABLE(
-                {database}.{schema}.{service_name}.SEARCH(
-                    '{query_escaped}',
-                    {limit}
-                )
-            )
-        """
-    
+        );
+    """
+
     try:
         result = session.sql(sql).collect()
         if result:
-            # Convert rows to dictionaries
-            results_list = []
-            for row in result:
-                row_dict = row.as_dict()
-                results_list.append(row_dict)
-            return results_list
+            return [row.as_dict() for row in result]
         return []
     except Exception as e:
         st.error(f"Search error: {str(e)}")
         return []
 
-def cortex_complete_stream(session, model, messages):
+# ---------------------------------------------------------
+# Cortex Complete Helper (for LLM responses)
+# ---------------------------------------------------------
+def cortex_complete(session, model, messages):
     """
-    Stream completion from Cortex Complete via SQL.
-    Yields chunks of text.
+    Call Snowflake Cortex Complete (non-streaming).
     """
-    # Format messages as JSON and escape single quotes
     messages_json = json.dumps(messages).replace("'", "''")
-    
+
     sql = f"""
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
             '{model}',
-            '{messages_json}'
-        ) AS response
+            PARSE_JSON('{messages_json}')
+        ) AS RESPONSE
     """
-    
+
     try:
         result = session.sql(sql).collect()
         if result:
-            response_text = result[0]['RESPONSE']
-            # Simulate streaming by yielding the full response
-            yield response_text
+            return result[0]['RESPONSE']
+        return "No response generated."
     except Exception as e:
-        yield f"Error generating response: {str(e)}"
+        return f"Error generating response: {str(e)}"
 
-# ------------------------------------------------------------------
-# CortexSearchRetriever (SQL-based)
-# ------------------------------------------------------------------
+# ---------------------------------------------------------
+# Retriever Class
+# ---------------------------------------------------------
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 2):
+    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 3):
         self._snowpark_session = snowpark_session
         self._limit_to_retrieve = limit_to_retrieve
         self._database = "CORTEX_SEARCH_TUTORIAL_DB"
@@ -110,7 +98,7 @@ class CortexSearchRetriever:
         self._service = "FOMC_SEARCH_SERVICE"
 
     def retrieve(self, query: str) -> List[str]:
-        """Retrieve chunks using Cortex Search via SQL"""
+        """Retrieve text chunks from Cortex Search"""
         results = cortex_search_query(
             self._snowpark_session,
             self._database,
@@ -120,127 +108,100 @@ class CortexSearchRetriever:
             columns=["chunk"],
             limit=self._limit_to_retrieve
         )
-        
         if results:
-            # Extract chunks from results - keys are uppercase
             chunks = []
-            for result in results:
-                if "CHUNK" in result:
-                    chunks.append(result["CHUNK"])
-                elif "chunk" in result:
-                    chunks.append(result["chunk"])
+            for r in results:
+                if "CHUNK" in r:
+                    chunks.append(r["CHUNK"])
+                elif "chunk" in r:
+                    chunks.append(r["chunk"])
             return chunks
         return []
 
-# ------------------------------------------------------------------
-# RAG class
-# ------------------------------------------------------------------
+# ---------------------------------------------------------
+# RAG Logic
+# ---------------------------------------------------------
 class RAG:
     def __init__(self):
         self.retriever = CortexSearchRetriever(session, limit_to_retrieve=5)
 
-    def retrieve_context(self, query: str) -> List[str]:
-        """Retrieve relevant text from vector store"""
+    def retrieve_context(self, query: str):
         return self.retriever.retrieve(query)
 
     def build_messages_with_context(self, conversation_messages, context_chunks):
-        """
-        Takes the entire conversation and appends a system message with context.
-        """
         updated_messages = list(conversation_messages)
 
         if context_chunks:
-            context_str = "\n\n".join([f"[Context {i+1}]: {chunk}" for i, chunk in enumerate(context_chunks)])
-            context_message_content = (
+            context_str = "\n\n".join(
+                [f"[Context {i+1}]: {chunk}" for i, chunk in enumerate(context_chunks)]
+            )
+            context_message = (
                 f"You have retrieved the following context:\n\n"
                 f"{context_str}\n\n"
-                "Based on the conversation and the context above, please answer the last user question "
-                "in a comprehensive and helpful way. If the context doesn't contain relevant information, "
-                "acknowledge that and provide a general answer."
+                "Based on the conversation and context above, answer the user's last question clearly. "
+                "If context is not relevant, acknowledge that and answer from general knowledge."
             )
         else:
-            context_message_content = (
-                "No specific context was retrieved. Please answer based on general knowledge, "
-                "but acknowledge the lack of specific context."
+            context_message = (
+                "No specific context retrieved. Answer based on general knowledge, "
+                "and acknowledge that context is missing."
             )
-        
-        updated_messages.append({"role": "system", "content": context_message_content})
+
+        updated_messages.append({"role": "system", "content": context_message})
         return updated_messages
 
-    def generate_completion_stream(self, messages):
-        """Stream the response using Cortex Complete"""
-        return cortex_complete_stream(session, "claude-3-5-sonnet", messages)
+    def generate_response(self, messages):
+        """Non-streaming response generation"""
+        return cortex_complete(session, "claude-3-5-sonnet", messages)
 
-# Instantiate the RAG
-rag = RAG()
-
-# ------------------------------------------------------------------
+# ---------------------------------------------------------
 # Streamlit Chat Logic
-# ------------------------------------------------------------------
+# ---------------------------------------------------------
+rag = RAG()
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if st.button("Clear Conversation"):
+if st.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
     st.rerun()
 
-def display_messages():
-    for message in st.session_state.messages:
-        role = message["role"]
-        content = message["content"]
-        if role == "user":
-            st.chat_message("user").write(content)
-        elif role == "assistant":
-            st.chat_message("assistant", avatar="🤖").write(content)
-
-# Render existing messages
-display_messages()
+# Display chat history
+for message in st.session_state.messages:
+    st.chat_message(message["role"]).write(message["content"])
 
 def answer_question_using_rag(query: str):
-    """
-    1) Retrieve context chunks
-    2) Build message array with context
-    3) Stream the LLM response
-    """
-    # Retrieve context
     with st.spinner("Retrieving context..."):
         context_chunks = rag.retrieve_context(query)
 
-    # Show context
     if context_chunks:
         st.write("**Relevant Context Found:**")
-        with st.expander("See retrieved context"):
+        with st.expander("📄 See retrieved context"):
             for i, chunk in enumerate(context_chunks):
-                wrapped_chunk = textwrap.fill(chunk, width=80)
-                st.info(f"**Context {i+1}:**\n{wrapped_chunk}")
+                st.info(f"**Context {i+1}:**\n{textwrap.fill(chunk, 80)}")
     else:
-        st.warning("No relevant context found. Answering from general knowledge.")
+        st.warning("⚠️ No relevant context found. Answering from general knowledge.")
 
-    # Build messages with context
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
-    # Stream the response
     with st.spinner("Generating response..."):
-        stream = rag.generate_completion_stream(updated_messages)
-    return stream
+        response_text = rag.generate_response(updated_messages)
+    return response_text
 
+# ---------------------------------------------------------
+# Main Chat Input
+# ---------------------------------------------------------
 def main():
     user_input = st.chat_input("Ask your question about FOMC or economic data...")
 
     if user_input:
-        # Append user message
         st.chat_message("user").write(user_input)
         st.session_state.messages.append({"role": "user", "content": user_input})
 
-        # Get RAG response
-        stream = answer_question_using_rag(user_input)
+        answer = answer_question_using_rag(user_input)
 
-        # Display streaming response
-        final_text = st.chat_message("assistant", avatar="🤖").write_stream(stream)
-
-        # Store assistant message
-        st.session_state.messages.append({"role": "assistant", "content": final_text})
+        st.chat_message("assistant", avatar="🤖").write(answer)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
 
 if __name__ == "__main__":
     main()
