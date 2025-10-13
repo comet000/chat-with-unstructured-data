@@ -25,7 +25,7 @@ session = Session.builder.configs(connection_parameters).create()
 st.title("💬 Chat with Cortex Search RAG")
 
 # ---------------------------------------------------------
-# Cortex Search Helper (✅ fixed syntax)
+# Cortex Search Helper (✅ fully fixed)
 # ---------------------------------------------------------
 def cortex_search_query(session, database, schema, service_name, query, columns=None, limit=5):
     """
@@ -34,27 +34,27 @@ def cortex_search_query(session, database, schema, service_name, query, columns=
     """
     query_escaped = query.replace("'", "''")
 
-    # Build column array
     if columns:
         columns_array = "ARRAY_CONSTRUCT(" + ", ".join([f"'{c}'" for c in columns]) + ")"
     else:
         columns_array = "NULL"
 
-    # ✅ Correct syntax for Cortex Search
-    # Must not include database/schema prefix before the service name
-    sql = f"""
-        USE SCHEMA {database}.{schema};
-        SELECT * FROM TABLE(
-            {service_name}!SEARCH(
-                '{query_escaped}',
-                {columns_array},
-                {limit}
-            )
-        );
-    """
-
     try:
+        # ✅ Step 1: Switch to the correct schema
+        session.use_schema(f"{database}.{schema}")
+
+        # ✅ Step 2: Run Cortex Search (must be one statement only)
+        sql = f"""
+            SELECT * FROM TABLE(
+                {service_name}!SEARCH(
+                    '{query_escaped}',
+                    {columns_array},
+                    {limit}
+                )
+            )
+        """
         result = session.sql(sql).collect()
+
         if result:
             return [row.as_dict() for row in result]
         return []
@@ -63,22 +63,20 @@ def cortex_search_query(session, database, schema, service_name, query, columns=
         return []
 
 # ---------------------------------------------------------
-# Cortex Complete Helper (for LLM responses)
+# Cortex Complete Helper (✅ fixed JSON variant error)
 # ---------------------------------------------------------
 def cortex_complete(session, model, messages):
     """
     Call Snowflake Cortex Complete (non-streaming).
     """
-    messages_json = json.dumps(messages).replace("'", "''")
-
-    sql = f"""
-        SELECT SNOWFLAKE.CORTEX.COMPLETE(
-            '{model}',
-            PARSE_JSON('{messages_json}')
-        ) AS RESPONSE
-    """
-
     try:
+        # Pass JSON directly (no need for PARSE_JSON or quotes)
+        sql = f"""
+            SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                '{model}',
+                {json.dumps(messages)}
+            ) AS RESPONSE
+        """
         result = session.sql(sql).collect()
         if result:
             return result[0]['RESPONSE']
@@ -139,7 +137,7 @@ class RAG:
                 f"You have retrieved the following context:\n\n"
                 f"{context_str}\n\n"
                 "Based on the conversation and context above, answer the user's last question clearly. "
-                "If context is not relevant, acknowledge that and answer from general knowledge."
+                "If the context is not relevant, acknowledge that and answer from general knowledge."
             )
         else:
             context_message = (
