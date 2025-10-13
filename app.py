@@ -1,8 +1,20 @@
 import streamlit as st
 import textwrap
 
-from snowflake.snowpark.context import get_active_session
-session = get_active_session()
+from snowflake.snowpark import Session
+import streamlit as st
+
+connection_parameters = {
+    "account": st.secrets["account"],
+    "user": st.secrets["user"],
+    "password": st.secrets["password"],
+    "warehouse": st.secrets["warehouse"],
+    "database": st.secrets["database"],
+    "schema": st.secrets["schema"],
+    "role": st.secrets["role"]
+}
+
+session = Session.builder.configs(connection_parameters).create()
 
 # -- Page Title --
 st.title("Chat with Cortex Search RAG")
