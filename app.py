@@ -97,12 +97,18 @@ def answer_question_using_rag(query: str):
     with st.spinner("Retrieving context..."):
         context_chunks = rag.retrieve_context(query)
 
+    # Debug chunk types and content to identify "undefined" roots
+    for i, chunk in enumerate(context_chunks):
+        st.write(f"DEBUG - Chunk {i} type: {type(chunk)}, content: {chunk}")
+
     st.write("**Relevant Context Found:**")
     with st.expander("See retrieved context"):
         for chunk in context_chunks:
             if chunk:
-                wrapped_chunk = textwrap.fill(chunk, width=60)
-                st.info(f"``````")  # <<< Corrected line here
+                # Defensive casting to string, strip whitespace
+                clean_chunk = str(chunk).strip()
+                wrapped_chunk = textwrap.fill(clean_chunk, width=60)
+                st.info(f"``````")
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
