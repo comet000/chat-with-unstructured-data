@@ -79,14 +79,14 @@ def cortex_complete_stream(session, model, messages):
     Stream completion from Cortex Complete via SQL.
     Yields chunks of text.
     """
-    # Format messages as JSON
+    # Format messages as JSON and escape single quotes
     messages_json = json.dumps(messages).replace("'", "''")
     
     sql = f"""
         SELECT SNOWFLAKE.CORTEX.COMPLETE(
             '{model}',
-            {messages_json}
-        ) as response
+            '{messages_json}'
+        ) AS response
     """
     
     try:
@@ -94,7 +94,6 @@ def cortex_complete_stream(session, model, messages):
         if result:
             response_text = result[0]['RESPONSE']
             # Simulate streaming by yielding the full response
-            # (Cortex Complete doesn't support true streaming via SQL)
             yield response_text
     except Exception as e:
         yield f"Error generating response: {str(e)}"
