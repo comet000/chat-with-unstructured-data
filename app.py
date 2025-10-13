@@ -29,8 +29,13 @@ def cortex_search_query(session, database, schema, service_name, query, columns=
     Query Cortex Search Service via SQL.
     Returns a list of result dictionaries.
     """
-    columns_param = f", COLUMNS => ARRAY_CONSTRUCT({', '.join([f\"'{c}'\" for c in columns])})" if columns else ""
     query_escaped = query.replace("'", "''")
+    
+    if columns:
+        columns_str = ', '.join([f"'{c}'" for c in columns])
+        columns_param = f", COLUMNS => ARRAY_CONSTRUCT({columns_str})"
+    else:
+        columns_param = ""
     
     sql = f"""
         SELECT PARSE_JSON(results) as results
