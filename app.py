@@ -5,7 +5,6 @@ from snowflake.core import Root
 from typing import List
 from snowflake.cortex import complete
 
-# Create Snowflake session explicitly with connection info from Streamlit secrets
 def create_snowflake_session():
     connection_parameters = {
         "account": st.secrets["account"],
@@ -23,7 +22,7 @@ session = create_snowflake_session()
 st.title("Chat with Cortex Search RAG")
 
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 5):
+    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 10):
         self._snowpark_session = snowpark_session
         self._limit_to_retrieve = limit_to_retrieve
 
@@ -31,61 +30,54 @@ class CortexSearchRetriever:
         root = Root(self._snowpark_session)
         search_service = (
             root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-               .schemas["PUBLIC"]
-               .cortex_search_services["FOMC_SEARCH_SERVICE"]
+            .schemas["PUBLIC"]
+            .cortex_search_services["FOMC_SEARCH_SERVICE"]
         )
         resp = search_service.search(
-            query=query,
-            columns=["chunk"],
-            limit=self._limit_to_retrieve
+            query=query, columns=["chunk"], limit=self._limit_to_retrieve
         )
         if resp.results:
             return [r["chunk"] for r in resp.results]
-        else:
-            return []
+        return []
 
 class RAG:
     def __init__(self):
-        self.retriever = CortexSearchRetriever(session, limit_to_retrieve=10)
+        self.retriever = CortexSearchRetriever(session)
 
     def retrieve_context(self, query: str) -> List[str]:
         chunks = self.retriever.retrieve(query)
-
-        # Simple duplication filtering by exact text content
+        # Deduplicate exact chunks ignoring whitespace and case
         seen = set()
-        filtered_chunks = []
+        filtered = []
         for chunk in chunks:
-            normalized = re.sub(r"\s+", " ", chunk.strip().lower())
-            if normalized not in seen:
-                seen.add(normalized)
-                filtered_chunks.append(chunk)
-        return filtered_chunks
+            norm = re.sub(r"\s+", " ", chunk.lower()).strip()
+            if norm not in seen:
+                seen.add(norm)
+                filtered.append(chunk)
+        return filtered
 
-    def build_messages_with_context(self, conversation_messages, context_chunks):
-        updated_messages = list(conversation_messages)
-        combined_context = "\n\n".join(str(chunk) for chunk in context_chunks)
-        context_message_content = (
+    def build_messages_with_context(self, messages, context):
+        updated = list(messages)
+        combined_context = "\n\n".join(str(c) for c in context)
+        system_content = (
             f"You have retrieved the following context (do not hallucinate beyond it):\n"
             f"{combined_context}\n\n"
-            "Based on the conversation so far and the context above, please answer the last user question "
-            "in a comprehensive, correct, and helpful way. If you don't have the information, just say so."
+            "Based on the conversation so far and the context above, provide a comprehensive answer."
         )
-        updated_messages.append({"role": "system", "content": context_message_content})
-        return updated_messages
+        updated.append({"role": "system", "content": system_content})
+        return updated
 
     def generate_completion_stream(self, messages):
-        stream = complete(
-            "claude-3-5-sonnet",
-            messages,
-            stream=True,
-            session=session
-        )
-        return stream
+        return complete("claude-3-5-sonnet", messages, stream=True, session=session)
 
-def fix_stuck_words(text: str) -> str:
-    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-    text = re.sub(r'([.,!?])([A-Za-z])', r'\1 \2', text)
+def fix_text_formatting(text: str) -> str:
+    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
+    text = re.sub(r"([.,!?])([A-Za-z])", r"\1 \2", text)
     return text
+
+def split_paragraphs(text: str) -> List[str]:
+    paragraphs = re.split(r"\n{2,}|(?<=[.?!])\s*\n", text)
+    return [p.strip() for p in paragraphs if p.strip()]
 
 rag = RAG()
 
@@ -96,60 +88,45 @@ if st.button("Clear Conversation"):
     st.session_state.messages.clear()
 
 def display_messages():
-    for message in st.session_state.messages:
-        role = message["role"]
-        content = message["content"]
+    for m in st.session_state.messages:
+        role = m["role"]
+        content = m["content"]
         if role == "user":
             st.chat_message("user").write(content)
-        elif role == "assistant":
+        else:
             st.chat_message("assistant", avatar="🤖").write(content)
-        elif role == "system":
-            st.chat_message("assistant", avatar="🔧").write(f"[SYSTEM] {content}")
 
 display_messages()
 
-def split_into_paragraphs(text: str) -> List[str]:
-    # Split text by 2+ newlines or punctuation + newline patterns to get paragraphs
-    paragraphs = re.split(r'\n{2,}|(?<=[.?!])\s*\n', text)
-    return [p.strip() for p in paragraphs if p.strip()]
-
 def answer_question_using_rag(query: str):
     with st.spinner("Retrieving context..."):
-        context_chunks = rag.retrieve_context(query)
+        chunks = rag.retrieve_context(query)
 
-    st.write("DEBUG - Context chunks raw data:", context_chunks)
+    st.write("DEBUG - Context chunks raw data:", chunks)
 
-    st.write("**Relevant Context Found:**")
     with st.expander("See retrieved context"):
-        for idx, chunk in enumerate(context_chunks):
-            if chunk:
-                clean_chunk = "".join(c for c in str(chunk) if c.isprintable()).strip()
-                fixed_chunk = fix_stuck_words(clean_chunk)
-                # Replace newlines with space for natural flow
-                flow_chunk = fixed_chunk.replace('\n', ' ')
+        for i, chunk in enumerate(chunks):
+            cleaned = "".join(c for c in str(chunk) if c.isprintable()).strip()
+            cleaned = fix_text_formatting(cleaned)
+            if i == 0:
+                st.markdown(f"### Source (approximate document title): {cleaned}")
+            else:
+                paragraphs = split_paragraphs(cleaned)
+                for para in paragraphs:
+                    para = para.replace("\n", " ")
+                    st.markdown(
+                        f"""
+                        <div style="
+                            max-height:250px; overflow-y:auto; border:1px solid #ccc;
+                            padding:10px; font-size:14px; margin-bottom:10px;">
+                            {para}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                st.markdown("---")
 
-                if idx == 0:
-                    st.markdown(f"### Source (document title): {flow_chunk}")
-                else:
-                    paragraphs = split_into_paragraphs(fixed_chunk)
-                    for para in paragraphs:
-                        flow_para = para.replace("\n", " ")
-                        st.markdown(f"""
-                            <div style="
-                                max-height: 250px;
-                                overflow-y: auto;
-                                border:1px solid #ccc;
-                                padding: 10px;
-                                white-space: normal;
-                                font-size: 14px;
-                                margin-bottom: 10px;
-                            ">
-                            {flow_para}
-                            </div>
-                            """, unsafe_allow_html=True)
-                    st.markdown("---")
-
-    updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
+    updated_messages = rag.build_messages_with_context(st.session_state.messages, chunks)
 
     with st.spinner("Generating response..."):
         stream = rag.generate_completion_stream(updated_messages)
