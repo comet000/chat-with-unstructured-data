@@ -102,7 +102,7 @@ def answer_question_using_rag(query: str):
         for chunk in context_chunks:
             if chunk:
                 wrapped_chunk = textwrap.fill(chunk, width=60)
-                st.info(f"``````")
+                st.info(f"``````")  # <<< Corrected line here
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
