@@ -1,2 +1,6 @@
-streamlit>=1.28.0
-snowflake-snowpark-python>=1.11.0
+streamlit
+snowflake-ml-python
+snowflake.core
+trulens-core
+trulens-providers-cortex
+trulens-connectors-snowflake
