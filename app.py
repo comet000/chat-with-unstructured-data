@@ -6,7 +6,7 @@ from typing import List
 import numpy as np
 from snowflake.cortex import complete
 
-# Create Snowflake session from Streamlit secrets
+# Create Snowflake session explicitly with connection info from Streamlit secrets
 def create_snowflake_session():
     connection_parameters = {
         "account": st.secrets["account"],
@@ -21,14 +21,8 @@ def create_snowflake_session():
 
 session = create_snowflake_session()
 
-# -- Page Title --
 st.title("Chat with Cortex Search RAG")
 
-# ------------------------------------------------------
-# 1. RAG + TruLens Setup
-# ------------------------------------------------------
-
-# A simple CortexSearchRetriever that queries your search service
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 2):
         self._snowpark_session = snowpark_session
@@ -36,36 +30,29 @@ class CortexSearchRetriever:
 
     def retrieve(self, query: str) -> List[str]:
         root = Root(self._snowpark_session)
-
-        # Adjust DB/SCHEMA/SERVICE to match your environment
         search_service = (
             root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
                .schemas["PUBLIC"]
                .cortex_search_services["FOMC_SEARCH_SERVICE"]
         )
-
         resp = search_service.search(
             query=query,
             columns=["chunk"],
             limit=self._limit_to_retrieve
         )
-
         if resp.results:
             return [r["chunk"] for r in resp.results]
         else:
             return []
 
-# RAG class
 class RAG:
     def __init__(self):
         self.retriever = CortexSearchRetriever(session, limit_to_retrieve=5)
 
     def retrieve_context(self, query: str) -> List[str]:
-        """Retrieve relevant text from vector store."""
         return self.retriever.retrieve(query)
 
     def build_messages_with_context(self, conversation_messages, context_chunks):
-        """Appends a new system-level instruction message with the retrieved context."""
         updated_messages = list(conversation_messages)
         context_message_content = (
             f"You have retrieved the following context (do not hallucinate beyond it):\n"
@@ -77,23 +64,18 @@ class RAG:
         return updated_messages
 
     def generate_completion_stream(self, messages):
-        """Stream the response from language model."""
         stream = complete(
             "claude-3-5-sonnet",
             messages,
-            stream=True
+            stream=True,
+            session=session  # Explicitly pass Snowflake session here
         )
         return stream
 
-# Instantiate the RAG
 rag = RAG()
 
-# ------------------------------------------------------
-# 2. Streamlit Chat Logic
-# ------------------------------------------------------
-
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # For UI chat display (user + assistant)
+    st.session_state.messages = []
 
 if st.button("Clear Conversation"):
     st.session_state.messages.clear()
@@ -107,19 +89,11 @@ def display_messages():
         elif role == "assistant":
             st.chat_message("assistant", avatar="🤖").write(content)
         elif role == "system":
-            # Optional system messages display
             st.chat_message("assistant", avatar="🔧").write(f"[SYSTEM] {content}")
 
-# Render existing messages
 display_messages()
 
 def answer_question_using_rag(query: str):
-    """
-    1) Append user question to session_state.messages.
-    2) Retrieve context chunks.
-    3) Build new message array with conversation + context.
-    4) Stream the LLM response.
-    """
     with st.spinner("Retrieving context..."):
         context_chunks = rag.retrieve_context(query)
 
@@ -139,17 +113,13 @@ def answer_question_using_rag(query: str):
 def main():
     user_input = st.chat_input("Ask your question about FOMC or economic data...")
     if user_input:
-        # Append user message to conversation
         st.chat_message("user").write(user_input)
         st.session_state.messages.append({"role": "user", "content": user_input})
 
-        # Get streaming answer from RAG pipeline
         stream = answer_question_using_rag(user_input)
 
-        # Display streaming assistant message
         final_text = st.chat_message("assistant", avatar="🤖").write_stream(stream)
 
-        # Store assistant message in conversation state
         st.session_state.messages.append({"role": "assistant", "content": final_text})
 
 if __name__ == "__main__":
