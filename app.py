@@ -1,9 +1,7 @@
 import streamlit as st
-import textwrap
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from typing import List
-import numpy as np
 from snowflake.cortex import complete
 
 # Create Snowflake session explicitly with connection info from Streamlit secrets
@@ -69,7 +67,7 @@ class RAG:
             "claude-3-5-sonnet",
             messages,
             stream=True,
-            session=session  # Explicitly pass Snowflake session here
+            session=session
         )
         return stream
 
@@ -98,7 +96,7 @@ def answer_question_using_rag(query: str):
     with st.spinner("Retrieving context..."):
         context_chunks = rag.retrieve_context(query)
 
-    # Show debug info
+    # Debug output
     st.write("DEBUG - Context chunks raw data:", context_chunks)
 
     st.write("**Relevant Context Found:**")
@@ -106,8 +104,8 @@ def answer_question_using_rag(query: str):
         for chunk in context_chunks:
             if chunk:
                 clean_chunk = "".join(c for c in str(chunk) if c.isprintable()).strip()
-                wrapped_chunk = textwrap.fill(clean_chunk, width=60)
-                st.code(wrapped_chunk)  # Use st.code to avoid markdown rendering problems
+                st.markdown(clean_chunk)
+                st.markdown("---")  # horizontal divider for readability
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
