@@ -1,9 +1,10 @@
 import streamlit as st
 import textwrap
-
 from snowflake.snowpark import Session
-import streamlit as st
+from typing import List
+import json
 
+# Connection setup
 connection_parameters = {
     "account": st.secrets["account"],
     "user": st.secrets["user"],
@@ -11,7 +12,7 @@ connection_parameters = {
     "warehouse": st.secrets["warehouse"],
     "database": st.secrets["database"],
     "schema": st.secrets["schema"],
-    "role": st.secrets["role"]  # No quotes needed for uppercase role
+    "role": st.secrets["role"]
 }
 
 session = Session.builder.configs(connection_parameters).create()
@@ -20,38 +21,101 @@ session = Session.builder.configs(connection_parameters).create()
 st.title("Chat with Cortex Search RAG")
 
 # ------------------------------------------------------------------
-# 1. RAG + TruLens Setup
+# Helper Functions for Cortex (SQL-based, works on Streamlit Cloud)
 # ------------------------------------------------------------------
-from snowflake.core import Root
-from typing import List
-from snowflake.snowpark.session import Session
-import numpy as np
 
-from snowflake.cortex import complete
-     
-# -- A simple CortexSearchRetriever that queries your search service --
+def cortex_search_query(session, database, schema, service_name, query, columns=None, limit=5):
+    """
+    Query Cortex Search Service via SQL.
+    Returns a list of result dictionaries.
+    """
+    columns_param = f", COLUMNS => ARRAY_CONSTRUCT({', '.join([f\"'{c}'\" for c in columns])})" if columns else ""
+    query_escaped = query.replace("'", "''")
+    
+    sql = f"""
+        SELECT PARSE_JSON(results) as results
+        FROM TABLE(
+            {database}.{schema}.{service_name}!SEARCH(
+                QUERY => '{query_escaped}'
+                {columns_param},
+                LIMIT => {limit}
+            )
+        )
+    """
+    
+    try:
+        result = session.sql(sql).collect()
+        if result:
+            # Parse the JSON results
+            results_list = []
+            for row in result:
+                results_list.append(json.loads(row['RESULTS']))
+            return results_list
+        return []
+    except Exception as e:
+        st.error(f"Search error: {str(e)}")
+        return []
+
+def cortex_complete_stream(session, model, messages):
+    """
+    Stream completion from Cortex Complete via SQL.
+    Yields chunks of text.
+    """
+    # Format messages as JSON
+    messages_json = json.dumps(messages).replace("'", "''")
+    
+    sql = f"""
+        SELECT SNOWFLAKE.CORTEX.COMPLETE(
+            '{model}',
+            {messages_json}
+        ) as response
+    """
+    
+    try:
+        result = session.sql(sql).collect()
+        if result:
+            response_text = result[0]['RESPONSE']
+            # Simulate streaming by yielding the full response
+            # (Cortex Complete doesn't support true streaming via SQL)
+            yield response_text
+    except Exception as e:
+        yield f"Error generating response: {str(e)}"
+
+# ------------------------------------------------------------------
+# CortexSearchRetriever (SQL-based)
+# ------------------------------------------------------------------
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 2):
         self._snowpark_session = snowpark_session
         self._limit_to_retrieve = limit_to_retrieve
+        self._database = "CORTEX_SEARCH_TUTORIAL_DB"
+        self._schema = "PUBLIC"
+        self._service = "FOMC_SEARCH_SERVICE"
 
     def retrieve(self, query: str) -> List[str]:
-        root = Root(self._snowpark_session)
-        # Adjust DB/SCHEMA/SERVICE to match your environment
-        search_service = (
-            root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-            .schemas["PUBLIC"]
-            .cortex_search_services["FOMC_SEARCH_SERVICE"]
-        )
-        resp = search_service.search(
-            query=query,
+        """Retrieve chunks using Cortex Search via SQL"""
+        results = cortex_search_query(
+            self._snowpark_session,
+            self._database,
+            self._schema,
+            self._service,
+            query,
             columns=["chunk"],
             limit=self._limit_to_retrieve
         )
-        if resp.results:
-            return [r["chunk"] for r in resp.results]
-        else:
-            return []
+        
+        if results:
+            # Extract chunks from results
+            chunks = []
+            for result in results:
+                if isinstance(result, dict) and "chunk" in result:
+                    chunks.append(result["chunk"])
+                elif isinstance(result, list):
+                    for item in result:
+                        if isinstance(item, dict) and "chunk" in item:
+                            chunks.append(item["chunk"])
+            return chunks
+        return []
 
 # ------------------------------------------------------------------
 # RAG class
@@ -61,53 +125,50 @@ class RAG:
         self.retriever = CortexSearchRetriever(session, limit_to_retrieve=5)
 
     def retrieve_context(self, query: str) -> List[str]:
-        """
-        Retrieve relevant text from vector store (instrumented).
-        """
+        """Retrieve relevant text from vector store"""
         return self.retriever.retrieve(query)
 
     def build_messages_with_context(self, conversation_messages, context_chunks):
         """
-        Takes the entire conversation (in Chat-style messages) and appends
-        a new system-level instruction message containing the retrieved context.
-        Then returns the updated list of messages.
+        Takes the entire conversation and appends a system message with context.
         """
-        # Create a copy so we don't mutate the original list in session state
         updated_messages = list(conversation_messages)
 
-        # Add a system message that includes the context
-        context_message_content = (
-            f"You have retrieved the following context (do not hallucinate beyond it):\n"
-            f"{context_chunks}\n\n"
-            "Based on the conversation so far and the context above, please answer the last user question "
-            "in a comprehensive, correct, and helpful way. If you don't have the information, just say so."
-        )
+        if context_chunks:
+            context_str = "\n\n".join([f"[Context {i+1}]: {chunk}" for i, chunk in enumerate(context_chunks)])
+            context_message_content = (
+                f"You have retrieved the following context:\n\n"
+                f"{context_str}\n\n"
+                "Based on the conversation and the context above, please answer the last user question "
+                "in a comprehensive and helpful way. If the context doesn't contain relevant information, "
+                "acknowledge that and provide a general answer."
+            )
+        else:
+            context_message_content = (
+                "No specific context was retrieved. Please answer based on general knowledge, "
+                "but acknowledge the lack of specific context."
+            )
+        
         updated_messages.append({"role": "system", "content": context_message_content})
         return updated_messages
 
     def generate_completion_stream(self, messages):
-        """
-        Stream the response from 'claude-3-5-sonnet', using the entire conversation messages.
-        """
-        stream = complete(
-            "claude-3-5-sonnet",
-            messages,
-            stream=True
-        )
-        return stream
+        """Stream the response using Cortex Complete"""
+        return cortex_complete_stream(session, "claude-3-5-sonnet", messages)
 
 # Instantiate the RAG
 rag = RAG()
 
 # ------------------------------------------------------------------
-# 2. Streamlit Chat Logic
+# Streamlit Chat Logic
 # ------------------------------------------------------------------
 
 if "messages" not in st.session_state:
-    st.session_state.messages = []  # For UI chat display (user + assistant)
+    st.session_state.messages = []
 
 if st.button("Clear Conversation"):
     st.session_state.messages.clear()
+    st.rerun()
 
 def display_messages():
     for message in st.session_state.messages:
@@ -117,37 +178,34 @@ def display_messages():
             st.chat_message("user").write(content)
         elif role == "assistant":
             st.chat_message("assistant", avatar="🤖").write(content)
-        elif role == "system":
-            # If you want to display system messages in the UI as well:
-            st.chat_message("assistant", avatar="🔧").write(f"[SYSTEM] {content}")
 
 # Render existing messages
 display_messages()
 
 def answer_question_using_rag(query: str):
     """
-    1) Append the user question to st.session_state.messages.
-    2) Retrieve context chunks.
-    3) Build a new message array that includes the entire conversation + a system msg w/ context.
-    4) Stream the LLM response.
+    1) Retrieve context chunks
+    2) Build message array with context
+    3) Stream the LLM response
     """
-    # -- STEP 1: The user question is already appended in main(), so we have the full conversation in st.session_state.messages.
-
-    # -- STEP 2: Retrieve context
+    # Retrieve context
     with st.spinner("Retrieving context..."):
         context_chunks = rag.retrieve_context(query)
 
-    # Show context above LLM answer
-    st.write("**Relevant Context Found:**")
-    with st.expander("See retrieved context"):
-        for chunk in context_chunks:
-            wrapped_chunk = textwrap.fill(chunk, width=60)  # Wrap at 60 characters (for example)
-            st.info(f"```\n{wrapped_chunk}\n```")
+    # Show context
+    if context_chunks:
+        st.write("**Relevant Context Found:**")
+        with st.expander("See retrieved context"):
+            for i, chunk in enumerate(context_chunks):
+                wrapped_chunk = textwrap.fill(chunk, width=80)
+                st.info(f"**Context {i+1}:**\n{wrapped_chunk}")
+    else:
+        st.warning("No relevant context found. Answering from general knowledge.")
 
-    # -- STEP 3: Build new message array including the entire conversation + a system message w/ context
+    # Build messages with context
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
-    # -- STEP 4: Stream the final LLM response
+    # Stream the response
     with st.spinner("Generating response..."):
         stream = rag.generate_completion_stream(updated_messages)
     return stream
@@ -156,17 +214,17 @@ def main():
     user_input = st.chat_input("Ask your question about FOMC or economic data...")
 
     if user_input:
-        # Step 1: Append user message to st.session_state for the conversation history
+        # Append user message
         st.chat_message("user").write(user_input)
         st.session_state.messages.append({"role": "user", "content": user_input})
 
-        # Step 2: Call the RAG pipeline to get a streaming generator
+        # Get RAG response
         stream = answer_question_using_rag(user_input)
 
-        # Step 3: Display the final LLM streaming response
+        # Display streaming response
         final_text = st.chat_message("assistant", avatar="🤖").write_stream(stream)
 
-        # Step 4: Store final assistant message so it remains in the conversation
+        # Store assistant message
         st.session_state.messages.append({"role": "assistant", "content": final_text})
 
 if __name__ == "__main__":
