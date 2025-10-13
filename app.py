@@ -6,33 +6,30 @@ from snowflake.core import Root
 from snowflake.cortex import complete
 
 # --------------------------------------------------
-# 🧩 Streamlit Page Setup
+# 🌐 Streamlit Page Setup
 # --------------------------------------------------
-st.set_page_config(page_title="Chat with Cortex Search RAG", page_icon="🤖", layout="centered")
+st.set_page_config(page_title="Chat with FOMC Data", page_icon="📊", layout="centered")
 
 st.markdown("""
 <style>
-.stChatMessage {font-family: 'Inter', sans-serif; font-size: 15px;}
-.stButton>button {border-radius: 8px; background-color: #0059ff; color:white;}
-.stButton>button:hover {background-color:#0042cc;}
 .context-card {
-    border:1px solid #ddd; border-radius:10px; padding:12px; 
-    margin-bottom:12px; background-color:#f9f9f9;
-    box-shadow: 1px 1px 3px rgba(0,0,0,0.05);
+  border:1px solid #ddd; border-radius:10px; padding:12px; 
+  margin-bottom:12px; background-color:#f9f9f9;
+  box-shadow:1px 1px 3px rgba(0,0,0,0.05);
 }
 .context-title {font-weight:600; font-size:15px;}
+.context-meta {font-size:12px; color:#777; margin-top:2px;}
 .context-body {font-size:13px; line-height:1.5; color:#333; margin-top:6px;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💬 Chat with Cortex Search RAG")
-
+st.title("💬 Chat with FOMC Economic Data (RAG Demo)")
 
 # --------------------------------------------------
-# 🔑 Snowflake Session
+# ❄️ Snowflake Session
 # --------------------------------------------------
 def create_snowflake_session():
-    connection_parameters = {
+    params = {
         "account": st.secrets["account"],
         "user": st.secrets["user"],
         "password": st.secrets["password"],
@@ -41,93 +38,119 @@ def create_snowflake_session():
         "schema": st.secrets["schema"],
         "role": st.secrets["role"],
     }
-    return Session.builder.configs(connection_parameters).create()
+    return Session.builder.configs(params).create()
 
 session = create_snowflake_session()
 
 
 # --------------------------------------------------
-# 🧠 Retriever Class
+# 🔎 Cortex Retriever
 # --------------------------------------------------
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 10):
-        self._snowpark_session = snowpark_session
-        self._limit_to_retrieve = limit_to_retrieve
+    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 8):
+        self.session = snowpark_session
+        self.limit = limit_to_retrieve
 
-    def retrieve(self, query: str) -> List[str]:
-        root = Root(self._snowpark_session)
-        search_service = (
+    def retrieve(self, query: str):
+        root = Root(self.session)
+        svc = (
             root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
             .schemas["PUBLIC"]
             .cortex_search_services["FOMC_SEARCH_SERVICE"]
         )
-        resp = search_service.search(
-            query=query, columns=["chunk"], limit=self._limit_to_retrieve
+        resp = svc.search(
+            query=query,
+            columns=["chunk", "source", "year"],  # <- include metadata
+            limit=self.limit,
         )
-        if resp.results:
-            return [r["chunk"] for r in resp.results]
-        return []
+        return resp.results or []
 
 
 # --------------------------------------------------
-# 🧹 Utility Functions
+# 🧠 RAG Pipeline
 # --------------------------------------------------
-def fix_text_formatting(text: str) -> str:
-    text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
-    text = re.sub(r"([.,!?])([A-Za-z])", r"\1 \2", text)
-    return text.strip()
+def clean_text(t):
+    t = re.sub(r"\s+", " ", str(t)).strip()
+    return t
 
-def split_paragraphs(text: str) -> List[str]:
-    paragraphs = re.split(r"\n{2,}|(?<=[.?!])\s*\n", text)
-    return [p.strip() for p in paragraphs if p.strip()]
-
-def dedupe_context_texts(texts: List[str]) -> List[str]:
-    seen, result = set(), []
+def dedupe_texts(texts):
+    seen, out = set(), []
     for t in texts:
-        cleaned = re.sub(r"\s+", " ", t.strip().lower())
-        if any(cleaned in s or s in cleaned for s in seen):
-            continue
-        seen.add(cleaned)
-        result.append(t)
-    return result
+        key = clean_text(t).lower()
+        if key not in seen:
+            seen.add(key)
+            out.append(t)
+    return out
 
-
-# --------------------------------------------------
-# ✨ RAG Class
-# --------------------------------------------------
 class RAG:
     def __init__(self):
         self.retriever = CortexSearchRetriever(session)
 
-    def retrieve_context(self, query: str) -> List[str]:
-        chunks = self.retriever.retrieve(query)
-        chunks = dedupe_context_texts(chunks)
-        return chunks
+    def retrieve_context(self, query):
+        raw = self.retriever.retrieve(query)
+        chunks = []
+        for r in raw:
+            chunk = clean_text(r.get("chunk"))
+            meta = {
+                "chunk": chunk,
+                "source": r.get("source", "Unknown source"),
+                "year": r.get("year", "—"),
+            }
+            chunks.append(meta)
+        # dedupe
+        unique = []
+        seen = set()
+        for c in chunks:
+            norm = c["chunk"].lower()
+            if norm not in seen:
+                seen.add(norm)
+                unique.append(c)
+        return unique
 
-    def summarize_context(self, contexts: List[str]) -> str:
-        if not contexts:
-            return "No relevant context retrieved."
-        joined = "\n\n".join(contexts)
+    def rerank_context(self, query, contexts):
+        # lightweight reranking using Claude
+        prompt = f"""Given the query:
+{query}
+
+Rank the following text excerpts from most to least relevant. 
+Return a JSON list of indexes (0-based) sorted by relevance.
+
+Excerpts:
+{[c["chunk"][:400] for c in contexts]}
+"""
+        resp = complete("claude-3-5-sonnet", prompt, session=session)
+        try:
+            order = [int(i) for i in re.findall(r"\d+", str(resp))]
+            ordered = [contexts[i] for i in order if i < len(contexts)]
+            return ordered[:6]
+        except:
+            return contexts[:6]
+
+    def summarize_contexts(self, contexts):
+        text_blocks = "\n\n".join(
+            [f"[{c['source']} {c['year']}]\n{c['chunk']}" for c in contexts]
+        )
         prompt = (
-            "Summarize the following retrieved text into a concise, factual summary. "
-            "Keep key numbers or policy statements where relevant:\n\n"
-            f"{joined}"
+            "Summarize the following FOMC excerpts by year and topic. "
+            "Highlight numeric forecasts and major policy remarks. "
+            "Output should be concise, factual, and grouped by year:\n\n"
+            f"{text_blocks}"
         )
         summary = complete("claude-3-5-sonnet", prompt, session=session)
         return str(summary).strip()
 
-    def build_messages_with_context(self, messages, context):
-        summary = self.summarize_context(context)
-        system_content = (
-            f"You have retrieved the following summarized context:\n{summary}\n\n"
-            "Answer the user's question based only on this context. "
-            "If unsure, say you don't know."
+    def build_prompt(self, query, summary):
+        system_prompt = (
+            "You are an analyst assistant specializing in FOMC reports. "
+            "Answer factually using only the summarized context provided below. "
+            "Include numeric values and cite the year or source next to each number. "
+            "If data for the requested period isn't present, state that clearly.\n\n"
+            f"=== CONTEXT SUMMARY ===\n{summary}\n\n"
+            f"=== QUESTION ===\n{query}\n"
         )
-        updated = list(messages)
-        updated.append({"role": "system", "content": system_content})
-        return updated
+        return system_prompt
 
-    def generate_completion_stream(self, messages):
+    def generate_stream(self, messages):
         return complete("claude-3-5-sonnet", messages, stream=True, session=session)
 
 
@@ -135,7 +158,7 @@ rag = RAG()
 
 
 # --------------------------------------------------
-# 💬 Streamlit Chat Logic
+# 💬 Chat Logic
 # --------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -143,79 +166,48 @@ if "messages" not in st.session_state:
 if st.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
 
-
-def display_messages():
-    for m in st.session_state.messages:
-        role = m["role"]
-        content = m["content"]
-        if role == "user":
-            st.chat_message("user").write(content)
-        else:
-            st.chat_message("assistant", avatar="🤖").write(content)
+for m in st.session_state.messages:
+    st.chat_message(m["role"], avatar="🤖" if m["role"] == "assistant" else None).write(m["content"])
 
 
-display_messages()
+def answer_with_rag(query):
+    with st.spinner("🔎 Retrieving context..."):
+        raw_contexts = rag.retrieve_context(query)
+        contexts = rag.rerank_context(query, raw_contexts)
 
+    with st.expander("📚 See Retrieved Context"):
+        for c in contexts:
+            st.markdown(
+                f"""
+                <div class="context-card">
+                    <div class="context-title">{c['source']}</div>
+                    <div class="context-meta">Year: {c['year']}</div>
+                    <div class="context-body">{c['chunk'][:500]}{'...' if len(c['chunk'])>500 else ''}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-# --------------------------------------------------
-# ⚙️ Main RAG Interaction
-# --------------------------------------------------
-def answer_question_using_rag(query: str):
-    with st.spinner("Retrieving context..."):
-        chunks = rag.retrieve_context(query)
+    with st.spinner("🧾 Summarizing context..."):
+        summary = rag.summarize_contexts(contexts)
 
-    # 💡 Display retrieved context nicely
-    with st.expander("🔍 See Retrieved Context"):
-        if not chunks:
-            st.info("No relevant context retrieved.")
-        else:
-            seen_titles = set()
-            for i, chunk in enumerate(chunks):
-                cleaned = fix_text_formatting(chunk)
-                paragraphs = split_paragraphs(cleaned)
+    messages = [{"role": "system", "content": rag.build_prompt(query, summary)}]
 
-                if len(paragraphs[0].split()) < 10:
-                    title = paragraphs[0].strip()
-                    body = " ".join(paragraphs[1:])
-                else:
-                    title = f"Excerpt {i+1}"
-                    body = " ".join(paragraphs)
-
-                if title.lower() in seen_titles:
-                    continue
-                seen_titles.add(title.lower())
-
-                st.markdown(
-                    f"""
-                    <div class="context-card">
-                        <div class="context-title">{title}</div>
-                        <div class="context-body">{body[:600]}{'...' if len(body)>600 else ''}</div>
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-    updated_messages = rag.build_messages_with_context(st.session_state.messages, chunks)
-
-    with st.spinner("Generating response..."):
-        stream = rag.generate_completion_stream(updated_messages)
-
+    with st.spinner("🤖 Generating response..."):
+        stream = rag.generate_stream(messages)
     return stream
 
 
-# --------------------------------------------------
-# 🚀 Main Chat Loop
-# --------------------------------------------------
 def main():
-    user_input = st.chat_input("Ask your question about FOMC or economic data...")
-    if user_input:
-        st.chat_message("user").write(user_input)
-        st.session_state.messages.append({"role": "user", "content": user_input})
+    query = st.chat_input("Ask about inflation, GDP, or FOMC policy...")
+    if query:
+        st.chat_message("user").write(query)
+        st.session_state.messages.append({"role": "user", "content": query})
 
-        stream = answer_question_using_rag(user_input)
-        final_text = st.chat_message("assistant", avatar="🤖").write_stream(stream)
+        stream = answer_with_rag(query)
+        final = st.chat_message("assistant", avatar="🤖").write_stream(stream)
 
-        st.session_state.messages.append({"role": "assistant", "content": final_text})
+        st.session_state.messages.append({"role": "assistant", "content": final})
 
 
 if __name__ == "__main__":
