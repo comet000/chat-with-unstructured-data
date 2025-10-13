@@ -100,8 +100,9 @@ def answer_question_using_rag(query: str):
     st.write("**Relevant Context Found:**")
     with st.expander("See retrieved context"):
         for chunk in context_chunks:
-            wrapped_chunk = textwrap.fill(chunk, width=60)
-            st.info(f"``````")
+            if chunk:
+                wrapped_chunk = textwrap.fill(chunk, width=60)
+                st.info(f"``````")
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
