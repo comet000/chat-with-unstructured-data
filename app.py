@@ -11,7 +11,7 @@ connection_parameters = {
     "warehouse": st.secrets["warehouse"],
     "database": st.secrets["database"],
     "schema": st.secrets["schema"],
-    "role": st.secrets["role"]
+    "role": '"streamlit_readonly_role"'
 }
 
 session = Session.builder.configs(connection_parameters).create()
