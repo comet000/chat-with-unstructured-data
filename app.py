@@ -1,4 +1,5 @@
 import streamlit as st
+import re
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from typing import List
@@ -71,6 +72,13 @@ class RAG:
         )
         return stream
 
+def fix_stuck_words(text):
+    # Insert space between lowercase and uppercase letter transitions
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    # Insert space after punctuation if missing
+    text = re.sub(r'([.,!?])([A-Za-z])', r'\1 \2', text)
+    return text
+
 rag = RAG()
 
 if "messages" not in st.session_state:
@@ -96,7 +104,6 @@ def answer_question_using_rag(query: str):
     with st.spinner("Retrieving context..."):
         context_chunks = rag.retrieve_context(query)
 
-    # Debug output
     st.write("DEBUG - Context chunks raw data:", context_chunks)
 
     st.write("**Relevant Context Found:**")
@@ -104,8 +111,16 @@ def answer_question_using_rag(query: str):
         for chunk in context_chunks:
             if chunk:
                 clean_chunk = "".join(c for c in str(chunk) if c.isprintable()).strip()
-                st.markdown(clean_chunk)
-                st.markdown("---")  # horizontal divider for readability
+                fixed_chunk = fix_stuck_words(clean_chunk)
+                # Replace newlines by space to avoid stuck-together text in HTML div
+                html_friendly_chunk = fixed_chunk.replace('\n', ' ')
+                # Render within scrollable styled div for large chunks
+                st.markdown(f"""
+                    <div style="max-height: 400px; overflow-y: auto; border:1px solid #ccc; padding: 10px; white-space: normal;">
+                    {html_friendly_chunk}
+                    </div>
+                    """, unsafe_allow_html=True)
+                st.markdown("---")
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
