@@ -11,7 +11,7 @@ connection_parameters = {
     "warehouse": st.secrets["warehouse"],
     "database": st.secrets["database"],
     "schema": st.secrets["schema"],
-    "role": f'"{st.secrets["role"]}"'  # Add quotes here in the code
+    "role": st.secrets["role"]  # No quotes needed for uppercase role
 }
 
 session = Session.builder.configs(connection_parameters).create()
