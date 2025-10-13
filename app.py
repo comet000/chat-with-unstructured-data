@@ -46,10 +46,20 @@ class CortexSearchRetriever:
 
 class RAG:
     def __init__(self):
-        self.retriever = CortexSearchRetriever(session, limit_to_retrieve=5)
+        self.retriever = CortexSearchRetriever(session, limit_to_retrieve=10)
 
     def retrieve_context(self, query: str) -> List[str]:
-        return self.retriever.retrieve(query)
+        chunks = self.retriever.retrieve(query)
+
+        # Simple duplication filtering by exact text content
+        seen = set()
+        filtered_chunks = []
+        for chunk in chunks:
+            normalized = re.sub(r"\s+", " ", chunk.strip().lower())
+            if normalized not in seen:
+                seen.add(normalized)
+                filtered_chunks.append(chunk)
+        return filtered_chunks
 
     def build_messages_with_context(self, conversation_messages, context_chunks):
         updated_messages = list(conversation_messages)
@@ -72,7 +82,7 @@ class RAG:
         )
         return stream
 
-def fix_stuck_words(text):
+def fix_stuck_words(text: str) -> str:
     text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
     text = re.sub(r'([.,!?])([A-Za-z])', r'\1 \2', text)
     return text
@@ -98,6 +108,11 @@ def display_messages():
 
 display_messages()
 
+def split_into_paragraphs(text: str) -> List[str]:
+    # Split text by 2+ newlines or punctuation + newline patterns to get paragraphs
+    paragraphs = re.split(r'\n{2,}|(?<=[.?!])\s*\n', text)
+    return [p.strip() for p in paragraphs if p.strip()]
+
 def answer_question_using_rag(query: str):
     with st.spinner("Retrieving context..."):
         context_chunks = rag.retrieve_context(query)
@@ -106,28 +121,32 @@ def answer_question_using_rag(query: str):
 
     st.write("**Relevant Context Found:**")
     with st.expander("See retrieved context"):
-        for i, chunk in enumerate(context_chunks):
+        for idx, chunk in enumerate(context_chunks):
             if chunk:
                 clean_chunk = "".join(c for c in str(chunk) if c.isprintable()).strip()
                 fixed_chunk = fix_stuck_words(clean_chunk)
-                html_friendly_chunk = fixed_chunk.replace('\n', ' ')
+                # Replace newlines with space for natural flow
+                flow_chunk = fixed_chunk.replace('\n', ' ')
 
-                if i == 0:
-                    # Treat first chunk as source/title
-                    st.markdown(f"### Source (document title): {html_friendly_chunk}")
+                if idx == 0:
+                    st.markdown(f"### Source (document title): {flow_chunk}")
                 else:
-                    st.markdown(f"""
-                        <div style="
-                            max-height: 400px;
-                            overflow-y: auto;
-                            border:1px solid #ccc;
-                            padding: 10px;
-                            white-space: normal;
-                            font-size: 14px;
-                        ">
-                        {html_friendly_chunk}
-                        </div>
-                        """, unsafe_allow_html=True)
+                    paragraphs = split_into_paragraphs(fixed_chunk)
+                    for para in paragraphs:
+                        flow_para = para.replace("\n", " ")
+                        st.markdown(f"""
+                            <div style="
+                                max-height: 250px;
+                                overflow-y: auto;
+                                border:1px solid #ccc;
+                                padding: 10px;
+                                white-space: normal;
+                                font-size: 14px;
+                                margin-bottom: 10px;
+                            ">
+                            {flow_para}
+                            </div>
+                            """, unsafe_allow_html=True)
                     st.markdown("---")
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
