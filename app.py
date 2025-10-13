@@ -54,7 +54,6 @@ class RAG:
 
     def build_messages_with_context(self, conversation_messages, context_chunks):
         updated_messages = list(conversation_messages)
-        # Combine context chunks into one string message for system prompt
         combined_context = "\n\n".join(str(chunk) for chunk in context_chunks)
         context_message_content = (
             f"You have retrieved the following context (do not hallucinate beyond it):\n"
@@ -99,17 +98,16 @@ def answer_question_using_rag(query: str):
     with st.spinner("Retrieving context..."):
         context_chunks = rag.retrieve_context(query)
 
-    # Debug: Show raw context chunks
+    # Show debug info
     st.write("DEBUG - Context chunks raw data:", context_chunks)
 
     st.write("**Relevant Context Found:**")
     with st.expander("See retrieved context"):
         for chunk in context_chunks:
             if chunk:
-                clean_chunk = str(chunk).strip()
+                clean_chunk = "".join(c for c in str(chunk) if c.isprintable()).strip()
                 wrapped_chunk = textwrap.fill(clean_chunk, width=60)
-                # <-- Key fix: use st.markdown here to properly render formatted text
-                st.markdown(f"``````")
+                st.code(wrapped_chunk)  # Use st.code to avoid markdown rendering problems
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
