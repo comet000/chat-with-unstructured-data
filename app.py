@@ -1,104 +1,104 @@
 import streamlit as st
+from snowflake.snowpark import Session
 from snowflake.cortex import complete
-from snowflake.cortex import SearchService
+from trulens.core.otel.instrument import instrument
+from trulens.otel.semconv.trace import SpanAttributes
+from trulens_connectors.snowflake import CortexSearchRetriever
 
 # ----------------------------
 # CONFIG
 # ----------------------------
-st.set_page_config(page_title="FOMC RAG Chatbot", layout="wide")
-
-SERVICE_NAME = "FOMC_SEARCH_SERVICE"
-MODEL_NAME = "mistral-large"  # or llama-3-70b if you prefer
-NUM_RESULTS = 8
-SIMILARITY_THRESHOLD = 0.35  # lower = looser retrieval, higher = stricter
-
-# ----------------------------
-# INITIALIZE SEARCH SERVICE
-# ----------------------------
-@st.cache_resource(show_spinner=False)
-def get_search_service():
-    return SearchService(SERVICE_NAME)
-
-svc = get_search_service()
+ACCOUNT = "fokiamm-yqb60913"
+USER = "streamlit_demo_user"
+PASSWORD = "RagCortex#78_Pw"
+WAREHOUSE = "CORTEX_SEARCH_TUTORIAL_WH"
+DATABASE = "CORTEX_SEARCH_TUTORIAL_DB"
+SCHEMA = "PUBLIC"
 
 # ----------------------------
-# FUNCTIONS
+# SNOWFLAKE CONNECTION
 # ----------------------------
+@st.cache_resource
+def create_session():
+    connection_parameters = {
+        "account": ACCOUNT,
+        "user": USER,
+        "password": PASSWORD,
+        "warehouse": WAREHOUSE,
+        "database": DATABASE,
+        "schema": SCHEMA,
+    }
+    return Session.builder.configs(connection_parameters).create()
 
-def retrieve_context(query: str):
-    """Retrieve most relevant excerpts from Cortex Search."""
-    try:
-        resp = svc.search(
-            query=query,
-            columns=["chunk", "source"],  # removed 'year' to fix 400 error
-            limit=NUM_RESULTS,
+session = create_session()
+
+# ----------------------------
+# RAG RETRIEVAL CLASS
+# ----------------------------
+class RAG:
+    def __init__(self):
+        # Uses your existing Cortex Search index from Snowflake
+        self.retriever = CortexSearchRetriever(
+            snowpark_session=session,
+            limit_to_retrieve=10
         )
-        results = [
-            r for r in resp.results
-            if r.similarity > SIMILARITY_THRESHOLD
-        ]
-        return results
-    except Exception as e:
-        st.error(f"❌ Retrieval error: {e}")
-        return []
 
+    @instrument(
+        span_type=SpanAttributes.SpanType.RETRIEVAL,
+        attributes={SpanAttributes.RETRIEVAL.QUERY_TEXT: "query"}
+    )
+    def retrieve(self, query: str):
+        return self.retriever.retrieve(query)
 
-def generate_answer(query: str, context: str):
-    """Generate a concise, factual answer using Snowflake Cortex."""
-    prompt = f"""
-You are an analyst assistant specialized in interpreting FOMC meeting documents.
-You will answer questions using ONLY the provided excerpts.
-If the excerpts do not include an answer, say so clearly.
+    @instrument(
+        span_type=SpanAttributes.SpanType.GENERATION,
+        attributes={SpanAttributes.LLM.REQUEST_TEXT: "query"}
+    )
+    def generate(self, query: str, context: str):
+        prompt = f"""
+        You are an expert assistant helping answer questions about Snowflake Cortex data.
+        Use only the following context when answering.
 
-Question:
-{query}
+        Context:
+        {context}
 
-Context:
-{context}
+        Question:
+        {query}
 
-Answer directly, clearly, and factually:
-"""
-    try:
-        return complete(MODEL_NAME, prompt)
-    except Exception as e:
-        st.error(f"❌ Generation error: {e}")
-        return None
+        Provide a clear, concise, and factual answer:
+        """
+        return complete(model="mistral-large", prompt=prompt)
 
+rag = RAG()
 
 # ----------------------------
-# UI
+# STREAMLIT UI
 # ----------------------------
-st.title("📊 FOMC RAG Chatbot (Snowflake Cortex)")
-st.markdown("Ask questions about FOMC documents, projections, or inflation data.")
+st.set_page_config(page_title="Chat with Your Snowflake Data", layout="wide")
 
-query = st.text_input("Enter your question:", placeholder="e.g. What were the inflation expectations for 2025?")
+st.title("💬 Chat with Your Documents (Snowflake Cortex)")
+st.caption("Ask questions about your ingested documents directly from your Snowflake database.")
 
-if query:
-    with st.spinner("🔍 Retrieving relevant excerpts..."):
-        retrieved = retrieve_context(query)
+query = st.text_input("Enter your question:", placeholder="e.g. What does the FOMC policy statement say about inflation?")
+submit = st.button("Ask")
 
-    if not retrieved:
-        st.warning("No relevant context found. Try rephrasing your question.")
-    else:
-        # Prepare combined context
-        context_text = "\n\n".join([r["chunk"] for r in retrieved])
-        with st.spinner("🤖 Generating answer..."):
-            answer = generate_answer(query, context_text)
+if submit and query:
+    with st.spinner("Retrieving relevant information..."):
+        results = rag.retrieve(query)
 
-        if answer:
-            st.subheader("🤖 Answer")
-            st.write(answer)
+        if not results:
+            st.error("No relevant documents found in Cortex Search.")
+        else:
+            context_text = "\n\n".join([r["content"] for r in results])
+            with st.spinner("Generating answer using Snowflake Cortex..."):
+                answer = rag.generate(query, context_text)
+                st.markdown("### 💡 Answer")
+                st.write(answer)
 
-        # Expandable section for context
-        with st.expander("🔍 View Retrieved Context"):
-            for i, r in enumerate(retrieved, 1):
-                source = r.get("source", "Unknown Source")
-                st.markdown(f"**Excerpt {i}** — _{source}_")
-                st.write(r["chunk"])
-                st.divider()
+                with st.expander("View retrieved context"):
+                    for idx, r in enumerate(results, 1):
+                        st.markdown(f"**Source {idx}:**")
+                        st.write(r["content"])
 
-# ----------------------------
-# FOOTER
-# ----------------------------
-st.markdown("---")
-st.caption("Built with Snowflake Cortex Search + Streamlit • Improved by GPT-5")
+else:
+    st.info("Enter a question above to get started.")
