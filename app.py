@@ -2,7 +2,7 @@ import streamlit as st
 import re
 from snowflake.snowpark import Session
 from snowflake.core import Root
-from typing import List, Dict
+from typing import List
 from snowflake.cortex import complete
 
 # Create Snowflake session explicitly with connection info from Streamlit secrets
@@ -23,12 +23,11 @@ session = create_snowflake_session()
 st.title("Chat with Cortex Search RAG")
 
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 2):
+    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 5):
         self._snowpark_session = snowpark_session
         self._limit_to_retrieve = limit_to_retrieve
 
-    # Now returns list of dict with chunk text and source doc metadata
-    def retrieve(self, query: str) -> List[Dict[str, str]]:
+    def retrieve(self, query: str) -> List[str]:
         root = Root(self._snowpark_session)
         search_service = (
             root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
@@ -37,14 +36,11 @@ class CortexSearchRetriever:
         )
         resp = search_service.search(
             query=query,
-            columns=["chunk", "source_doc"],
+            columns=["chunk"],
             limit=self._limit_to_retrieve
         )
         if resp.results:
-            return [
-                {"chunk": r["chunk"], "source": r.get("source_doc", "Unknown Source")}
-                for r in resp.results
-            ]
+            return [r["chunk"] for r in resp.results]
         else:
             return []
 
@@ -52,12 +48,12 @@ class RAG:
     def __init__(self):
         self.retriever = CortexSearchRetriever(session, limit_to_retrieve=5)
 
-    def retrieve_context(self, query: str) -> List[Dict[str, str]]:
+    def retrieve_context(self, query: str) -> List[str]:
         return self.retriever.retrieve(query)
 
-    def build_messages_with_context(self, conversation_messages, context_items):
+    def build_messages_with_context(self, conversation_messages, context_chunks):
         updated_messages = list(conversation_messages)
-        combined_context = "\n\n".join(str(item["chunk"]) for item in context_items)
+        combined_context = "\n\n".join(str(chunk) for chunk in context_chunks)
         context_message_content = (
             f"You have retrieved the following context (do not hallucinate beyond it):\n"
             f"{combined_context}\n\n"
@@ -77,12 +73,8 @@ class RAG:
         return stream
 
 def fix_stuck_words(text):
-    # Insert space between lowercase-uppercase letter transitions
     text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-    # Insert space after punctuation if missing
     text = re.sub(r'([.,!?])([A-Za-z])', r'\1 \2', text)
-    # Optional: insert space before digits if stuck to letters
-    text = re.sub(r'([a-z])(\d)', r'\1 \2', text)
     return text
 
 rag = RAG()
@@ -108,36 +100,37 @@ display_messages()
 
 def answer_question_using_rag(query: str):
     with st.spinner("Retrieving context..."):
-        context_items = rag.retrieve_context(query)
+        context_chunks = rag.retrieve_context(query)
 
-    st.write("DEBUG - Context chunks raw data:", context_items)
+    st.write("DEBUG - Context chunks raw data:", context_chunks)
 
     st.write("**Relevant Context Found:**")
     with st.expander("See retrieved context"):
-        for item in context_items:
-            source = item.get("source", "Unknown Source")
-            chunk_text = item.get("chunk", "")
-            clean_chunk = "".join(c for c in str(chunk_text) if c.isprintable()).strip()
-            fixed_chunk = fix_stuck_words(clean_chunk)
-            # Replace newlines with spaces to avoid crushing text in HTML div
-            html_friendly_chunk = fixed_chunk.replace('\n', ' ')
+        for i, chunk in enumerate(context_chunks):
+            if chunk:
+                clean_chunk = "".join(c for c in str(chunk) if c.isprintable()).strip()
+                fixed_chunk = fix_stuck_words(clean_chunk)
+                html_friendly_chunk = fixed_chunk.replace('\n', ' ')
 
-            st.markdown(f"**Source:** {source}")
-            st.markdown(f"""
-                <div style="
-                    max-height: 400px;
-                    overflow-y: auto;
-                    border:1px solid #ccc;
-                    padding: 10px;
-                    white-space: normal;
-                    font-size: 14px;
-                ">
-                {html_friendly_chunk}
-                </div>
-                """, unsafe_allow_html=True)
-            st.markdown("---")
+                if i == 0:
+                    # Treat first chunk as source/title
+                    st.markdown(f"### Source (document title): {html_friendly_chunk}")
+                else:
+                    st.markdown(f"""
+                        <div style="
+                            max-height: 400px;
+                            overflow-y: auto;
+                            border:1px solid #ccc;
+                            padding: 10px;
+                            white-space: normal;
+                            font-size: 14px;
+                        ">
+                        {html_friendly_chunk}
+                        </div>
+                        """, unsafe_allow_html=True)
+                    st.markdown("---")
 
-    updated_messages = rag.build_messages_with_context(st.session_state.messages, context_items)
+    updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
     with st.spinner("Generating response..."):
         stream = rag.generate_completion_stream(updated_messages)
