@@ -31,30 +31,43 @@ def cortex_search_query(session, database, schema, service_name, query, columns=
     """
     query_escaped = query.replace("'", "''")
     
+    # Build columns array if provided
     if columns:
-        columns_str = ', '.join([f"'{c}'" for c in columns])
-        columns_param = f", COLUMNS => ARRAY_CONSTRUCT({columns_str})"
+        columns_array = "ARRAY_CONSTRUCT(" + ", ".join([f"'{c}'" for c in columns]) + ")"
     else:
-        columns_param = ""
+        columns_array = None
     
-    sql = f"""
-        SELECT PARSE_JSON(results) as results
-        FROM TABLE(
-            {database}.{schema}.{service_name}!SEARCH(
-                QUERY => '{query_escaped}'
-                {columns_param},
-                LIMIT => {limit}
+    # Build the SQL query
+    if columns_array:
+        sql = f"""
+            SELECT *
+            FROM TABLE(
+                {database}.{schema}.{service_name}.SEARCH(
+                    '{query_escaped}',
+                    {columns_array},
+                    {limit}
+                )
             )
-        )
-    """
+        """
+    else:
+        sql = f"""
+            SELECT *
+            FROM TABLE(
+                {database}.{schema}.{service_name}.SEARCH(
+                    '{query_escaped}',
+                    {limit}
+                )
+            )
+        """
     
     try:
         result = session.sql(sql).collect()
         if result:
-            # Parse the JSON results
+            # Convert rows to dictionaries
             results_list = []
             for row in result:
-                results_list.append(json.loads(row['RESULTS']))
+                row_dict = row.as_dict()
+                results_list.append(row_dict)
             return results_list
         return []
     except Exception as e:
@@ -110,15 +123,13 @@ class CortexSearchRetriever:
         )
         
         if results:
-            # Extract chunks from results
+            # Extract chunks from results - keys are uppercase
             chunks = []
             for result in results:
-                if isinstance(result, dict) and "chunk" in result:
+                if "CHUNK" in result:
+                    chunks.append(result["CHUNK"])
+                elif "chunk" in result:
                     chunks.append(result["chunk"])
-                elif isinstance(result, list):
-                    for item in result:
-                        if isinstance(item, dict) and "chunk" in item:
-                            chunks.append(item["chunk"])
             return chunks
         return []
 
