@@ -1,5 +1,8 @@
 streamlit
 snowflake-snowpark-python
 snowflake-connector-python
+snowflake-snowpark-python>=1.11.0
+snowflake-ml-python>=1.0.0
+streamlit>=1.28.0
 snowflake.core
 numpy
