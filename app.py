@@ -108,7 +108,8 @@ def answer_question_using_rag(query: str):
             if chunk:
                 clean_chunk = str(chunk).strip()
                 wrapped_chunk = textwrap.fill(clean_chunk, width=60)
-                st.markdown(f"``````")  # Key fix: use st.markdown here
+                # <-- Key fix: use st.markdown here to properly render formatted text
+                st.markdown(f"``````")
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, context_chunks)
 
