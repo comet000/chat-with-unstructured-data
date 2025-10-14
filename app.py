@@ -6,10 +6,18 @@ from snowflake.snowpark import Session
 from snowflake.core import Root
 from snowflake.cortex import complete
 
+# --- Initialize session state variables safely ---
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "rag_cache" not in st.session_state:
+    st.session_state.rag_cache = {}
+
 st.set_page_config(page_title="Chat with the Federal Reserve", page_icon="💬", layout="centered")
 st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
 st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
 
+# --- Snowflake session creation ---
 @st.cache_resource
 def create_snowflake_session():
     connection_parameters = {
@@ -28,8 +36,7 @@ root = Root(session)
 search_service = root.databases["CORTEX_SEARCH_TUTORIAL_DB"].schemas["PUBLIC"].cortex_search_services["FOMC_SEARCH_SERVICE"]
 
 def extract_target_years(query: str) -> List[int]:
-    years = re.findall(r'20\d{2}', query)
-    return [int(y) for y in years]
+    return [int(y) for y in re.findall(r'20\d{2}', query)]
 
 def extract_file_year(file_name: str) -> int:
     m = re.search(r'(\d{4})', file_name)
@@ -101,6 +108,7 @@ class CortexSearchRetriever:
             docs = docs[:self.limit]
 
             return [{"chunk": d["chunk"], "file_name": d["file_name"]} for d in docs]
+
         except Exception as e:
             st.error(f"❌ Cortex Search Error: {e}")
             return []
@@ -116,32 +124,30 @@ Glossary:
 """
 
 def build_system_prompt(query: str, contexts: List[dict]) -> str:
-    # Group context texts by year buckets for trend hints
-    grouped_texts = []
     year_buckets = {}
     for c in contexts[:7]:
         year = extract_file_year(c["file_name"])
         if year not in year_buckets:
             year_buckets[year] = []
         year_buckets[year].append(clean_chunk(c["chunk"]))
+    grouped_texts = []
     for year in sorted(year_buckets.keys()):
-        grouped_texts.append(f"Year {year} excerpts:\n" + "\n\n".join(year_buckets[year]))
+        grouped_texts.append(f"Year {year} excerpts:\n{chr(10).join(year_buckets[year])}")
     context_text = "\n\n".join(grouped_texts)
     if len(context_text) > 3500:
         context_text = context_text[:3500]
 
-    # Few-shot examples to encourage reasoning & multi-doc synthesis
     examples = """
 Examples of good answers:
 
 Q: How has the Fed's tone on inflation changed from 2023 to now?
-A: Based on documents from 2023 through 2025, the Fed shifted from expressing serious inflation concerns to cautiously optimistic language as inflation rates moderated...
+A: Based on documents from 2023 through 2025, the Fed shifted from serious inflation concerns to cautiously optimistic language as inflation moderated.
 
 Q: Did Powell mention gas prices recently?
-A: In recent press conferences, Powell acknowledged volatility in gas prices but noted their impact on overall inflation has been lessening...
+A: In recent press conferences, Powell acknowledged volatility in gas prices but noted their impact on overall inflation has been lessening.
 
 Q: Is the Fed planning rate cuts in 2025?
-A: Projections and dot plot data from late 2024 suggest some participants anticipate rate cuts in 2025, but the Fed emphasizes data-dependence...
+A: Projections and dot plot data from late 2024 suggest some participants anticipate rate cuts in 2025, but the Fed emphasizes data-dependence.
 
 Please answer fully and cite relevant document years when appropriate.
 """
@@ -172,10 +178,6 @@ def generate_response_stream(query: str, contexts: List[dict]):
     prompt = build_system_prompt(query, contexts)
     return complete("claude-3-5-sonnet", prompt, stream=True, session=session)
 
-# Streamlit UI logic
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
 if st.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
     st.session_state.rag_cache.clear()
@@ -183,30 +185,28 @@ if st.button("🧹 Clear Conversation"):
 for msg in st.session_state.messages:
     st.chat_message(msg["role"]).write(msg["content"])
 
-def run_query(query: str):
+def run_query(user_query: str):
     with st.spinner("Searching..."):
-        contexts = rag_retriever.retrieve(query)
+        contexts = rag_retriever.retrieve(user_query)
 
     with st.expander("🔍 See Retrieved Context"):
         if not contexts:
             st.info("No relevant context found.")
         for item in contexts:
             title = extract_clean_title(item["file_name"])
-            link = create_direct_link(item["file_name"])
+            pdf_url = create_direct_link(item["file_name"])
             snippet = clean_chunk(item["chunk"])[:600]
             snippet += "..." if len(item["chunk"]) > 600 else ""
             st.markdown(f"**{title}**")
             st.write(snippet)
-            st.markdown(f"[📄 View Full Document]({link})")
+            st.markdown(f"[📄 View Full Document]({pdf_url})")
 
     if not contexts:
         return ["No relevant context found."]
 
-    # Append system prompt with contexts and generate streamed answer
-    st.session_state.messages.append({"role": "system", "content": build_system_prompt(query, contexts)})
+    st.session_state.messages.append({"role": "system", "content": build_system_prompt(user_query, contexts)})
     with st.spinner("Generating response..."):
-        return generate_response_stream(query, contexts)
-
+        return generate_response_stream(user_query, contexts)
 
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
 if user_input:
