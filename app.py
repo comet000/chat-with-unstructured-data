@@ -8,7 +8,7 @@ from snowflake.cortex import complete
 # --------------------------------------------------
 # 🧩 Streamlit Page Setup
 # --------------------------------------------------
-st.set_page_config(page_title="Chat with FOMC Documents", page_icon="💬", layout="centered")
+st.set_page_config(page_title="Chat with the Federal Reserve", page_icon="💬", layout="centered")
 st.markdown("""
 <style>
 .stChatMessage {font-family: 'Inter', sans-serif; font-size: 15px;}
@@ -31,11 +31,6 @@ st.markdown("""
 .source-link:hover {
     text-decoration: underline;
 }
-mark {
-    background-color: #fff9c4 !important;
-    padding: 0.1em 0.2em;
-    border-radius: 2px;
-}
 /* Better table styling */
 .stMarkdown table {
     border-collapse: collapse;
@@ -53,7 +48,8 @@ mark {
 }
 </style>
 """, unsafe_allow_html=True)
-st.title("💬 Chat with FOMC and Economic Policy Documents")
+st.title("💬 Chat with the Federal Reserve")
+st.markdown("**RAG chat on all FOMC PDFs between 2023 - 2025**")
 
 # --------------------------------------------------
 # 🔑 Snowflake Session
@@ -118,16 +114,22 @@ def dedupe_context_texts(texts: List[dict]) -> List[dict]:
         result.append(item)
     return result
 
-def extract_clean_title(file_name: str, chunk: str) -> str:
-    """Extract a clean title from the file name and first meaningful content"""
-    # Clean the file name for display
-    clean_name = file_name.replace('.pdf', '').replace('_', ' ').title()
-    
-    # Try to extract a date from the file name
+def extract_clean_title(file_name: str) -> str:
+    """Extract a clean title from the file name"""
+    # Extract date from filename
     date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
     if date_match:
         year, month, day = date_match.groups()
-        clean_name = f"{clean_name} ({month}/{day}/{year})"
+        # Convert month number to month name
+        month_names = {
+            '01': 'January', '02': 'February', '03': 'March', '04': 'April',
+            '05': 'May', '06': 'June', '07': 'July', '08': 'August',
+            '09': 'September', '10': 'October', '11': 'November', '12': 'December'
+        }
+        month_name = month_names.get(month, month)
+        formatted_date = f"{month_name} {int(day)}, {year}"
+    else:
+        formatted_date = "Unknown Date"
     
     # Determine document type
     if 'minutes' in file_name.lower():
@@ -138,18 +140,31 @@ def extract_clean_title(file_name: str, chunk: str) -> str:
         doc_type = "Press Conference"
     elif 'transcript' in file_name.lower():
         doc_type = "Meeting Transcript"
+    elif 'statement' in file_name.lower():
+        doc_type = "Policy Statement"
     else:
         doc_type = "FOMC Document"
     
-    return f"{doc_type} - {clean_name}"
+    return f"{doc_type} - {formatted_date}"
 
 def create_direct_link(file_name: str) -> str:
-    """Create direct link to Federal Reserve PDF"""
-    base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
+    """Create direct link to Federal Reserve PDF with correct base URL"""
+    # Different document types have different base URLs
+    if 'presconf' in file_name.lower():
+        base_url = "https://www.federalreserve.gov/mediacenter/files/"
+    elif 'minutes' in file_name.lower():
+        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
+    elif 'proj' in file_name.lower() or 'sep' in file_name.lower():
+        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
+    elif 'statement' in file_name.lower():
+        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
+    elif 'transcript' in file_name.lower():
+        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
+    else:
+        # Default to monetarypolicy for unknown types
+        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
+    
     return f"{base_url}{file_name}"
-
-# Stopwords for highlighting
-STOPWORDS = {"the", "and", "for", "with", "from", "this", "that"}
 
 # --------------------------------------------------
 # ✨ RAG Class
@@ -260,7 +275,7 @@ def answer_question_using_rag(query: str):
                 cleaned = fix_text_formatting(chunk)
                 
                 # Get clean title from file name
-                title = extract_clean_title(file_name, cleaned)
+                title = extract_clean_title(file_name)
                 
                 if title in seen_titles:
                     continue
@@ -281,12 +296,6 @@ def answer_question_using_rag(query: str):
                 
                 body = " ".join(content_paragraphs)
                 
-                # Smarter highlighting: Filter query terms
-                query_words = {w.lower() for w in query.split() if len(w) > 4 and w.lower() not in STOPWORDS}
-                highlighted_body = body
-                for word in query_words:
-                    highlighted_body = re.sub(f"({re.escape(word)})", r"<mark>\1</mark>", highlighted_body, flags=re.IGNORECASE)
-                
                 # Create direct PDF link
                 pdf_url = create_direct_link(file_name)
                 
@@ -294,7 +303,7 @@ def answer_question_using_rag(query: str):
                     f"""
                     <div class="context-card">
                         <div class="context-title">{title}</div>
-                        <div class="context-body">{highlighted_body[:600]}{'...' if len(body)>600 else ''}</div>
+                        <div class="context-body">{body[:600]}{'...' if len(body)>600 else ''}</div>
                         <a href="{pdf_url}" target="_blank" class="source-link">
                             📄 View Full Document: {file_name}
                         </a>
