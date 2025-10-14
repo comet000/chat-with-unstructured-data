@@ -98,7 +98,7 @@ except Exception as e:
     st.stop()
 
 # --------------------------------------------------
-# 🧠 Retriever Class - SIMPLIFIED
+# 🧠 Retriever Class - INTELLIGENT DATE SORTING
 # --------------------------------------------------
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 10):
@@ -121,12 +121,90 @@ class CortexSearchRetriever:
             )
             
             if resp.results:
-                return [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
+                results = [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
+                # Intelligent sorting based on query context
+                return self._intelligent_sort(results, query)
             return []
             
         except Exception as e:
             st.error(f"❌ Cortex Search Error: {e}")
             return []
+
+    def _intelligent_sort(self, results: List[dict], query: str) -> List[dict]:
+        """Sort results based on query context"""
+        query_lower = query.lower()
+        
+        # Extract year from query if mentioned
+        query_year_match = re.search(r'20[2-3][0-9]', query)
+        query_year = int(query_year_match.group()) if query_year_match else None
+        
+        # Determine sorting strategy based on query intent
+        if any(term in query_lower for term in ['most recent', 'latest', 'current', 'newest', 'last']):
+            # For "most recent" queries, prioritize recent documents
+            return self._sort_by_date(results, reverse=True)
+        elif query_year:
+            # For specific year queries, prioritize that year
+            return self._sort_by_relevance_to_year(results, query_year)
+        elif any(term in query_lower for term in ['outlook', 'forecast', 'projection', 'future']):
+            # For future-looking queries, prioritize recent documents
+            return self._sort_by_date(results, reverse=True)
+        elif any(term in query_lower for term in ['historical', 'past', 'back in', 'during']):
+            # For historical queries, prioritize older documents
+            return self._sort_by_date(results, reverse=False)
+        else:
+            # Default: mix of relevance and recency
+            return self._balanced_sort(results)
+
+    def _sort_by_date(self, results: List[dict], reverse: bool = True) -> List[dict]:
+        """Sort by date extracted from filename"""
+        def extract_date(file_name):
+            date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
+            if date_match:
+                year, month, day = date_match.groups()
+                return int(year + month + day)
+            return 0
+        
+        return sorted(results, key=lambda x: extract_date(x["file_name"]), reverse=reverse)
+
+    def _sort_by_relevance_to_year(self, results: List[dict], target_year: int) -> List[dict]:
+        """Prioritize documents from the target year"""
+        def year_score(file_name):
+            date_match = re.search(r'(\d{4})', file_name)
+            if date_match:
+                file_year = int(date_match.group(1))
+                # Exact year match gets highest score
+                if file_year == target_year:
+                    return 100
+                # Nearby years get lower scores
+                elif abs(file_year - target_year) == 1:
+                    return 50
+                else:
+                    return 0
+            return 0
+        
+        scored_results = [(year_score(r["file_name"]), r) for r in results]
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        return [r for score, r in scored_results]
+
+    def _balanced_sort(self, results: List[dict]) -> List[dict]:
+        """Balance recency with relevance"""
+        def combined_score(result):
+            file_name = result["file_name"]
+            date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
+            if date_match:
+                year, month, day = map(int, date_match.groups())
+                # Recent documents get higher base scores
+                if year == 2025:
+                    return 30
+                elif year == 2024:
+                    return 20
+                elif year == 2023:
+                    return 10
+            return 5
+        
+        scored_results = [(combined_score(r), r) for r in results]
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        return [r for score, r in scored_results]
 
 # --------------------------------------------------
 # 🧹 Utility Functions
@@ -178,7 +256,7 @@ def clean_chunk_content(chunk: str) -> str:
     return cleaned.strip()
 
 # --------------------------------------------------
-# ✨ RAG Class
+# ✨ RAG Class - OPTIMIZED PERFORMANCE
 # --------------------------------------------------
 class RAG:
     def __init__(self):
@@ -197,15 +275,26 @@ class RAG:
         if not contexts:
             return "No relevant context retrieved."
         
-        chunk_texts = [item["chunk"] for item in contexts]
+        # Limit context to avoid timeout - take top 3 most relevant
+        limited_contexts = contexts[:3]
+        chunk_texts = [item["chunk"] for item in limited_contexts]
         joined = "\n\n".join(chunk_texts)
         
-        prompt = (
-            "You are an expert financial analyst familiar with FOMC policy statements, "
-            "minutes, and economic outlooks. Summarize the following excerpts clearly and concisely, "
-            "retaining key figures, policy stances, economic indicators, dates, and sources of expectations.\n\n"
-            f"{joined}"
-        )
+        # Limit total characters to prevent timeout
+        if len(joined) > 4000:
+            joined = joined[:4000] + "..."
+        
+        prompt = f"""
+        You are an expert financial analyst familiar with FOMC policy statements, minutes, and economic outlooks.
+        Summarize the following excerpts clearly and concisely, focusing on the most relevant information.
+        Retain key figures, policy stances, economic indicators, dates, and sources of expectations.
+        
+        Context:
+        {joined}
+        
+        Summary:
+        """
+        
         try:
             summary = complete("claude-3-5-sonnet", prompt, session=session)
             return str(summary).strip()
@@ -216,14 +305,19 @@ class RAG:
         summary = self.summarize_context(context)
         current_date = datetime.now().strftime("%B %d, %Y")
         
-        system_content = (
-            "You are an expert economic analyst specializing in FOMC communications. "
-            f"Current date context: It is currently {current_date}. "
-            "All documents in the provided context are real and current. "
-            "Do not question the validity or dates of any documents in the context. "
-            "Use the following summarized context from official FOMC documents to answer the user's question.\n\n"
-            f"Context Summary:\n{summary}"
-        )
+        system_content = f"""
+        You are an expert economic analyst specializing in FOMC communications.
+        Current date context: It is currently {current_date}.
+        All documents in the provided context are real and current.
+        Do not question the validity or dates of any documents in the context.
+        
+        Answer the question in long-form, fully and completely, based on the context. Do not hallucinate.
+        If you don't have the information just say so.
+        
+        Context Summary:
+        {summary}
+        """
+        
         updated = list(messages)
         updated.append({"role": "system", "content": system_content})
         return updated
