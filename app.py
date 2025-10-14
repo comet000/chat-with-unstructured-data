@@ -32,20 +32,6 @@ st.markdown("""
 .source-link:hover {
     text-decoration: underline;
 }
-.stMarkdown table {
-    border-collapse: collapse;
-    width: 100%;
-    margin: 1em 0;
-}
-.stMarkdown th, .stMarkdown td {
-    border: 1px solid #ddd;
-    padding: 8px 12px;
-    text-align: left;
-}
-.stMarkdown th {
-    background-color: #f2f2f2;
-    font-weight: 600;
-}
 </style>
 """, unsafe_allow_html=True)
 st.title("💬 Chat with the Federal Reserve")
@@ -69,142 +55,262 @@ def create_snowflake_session():
 
 try:
     session = create_snowflake_session()
-    
-    # Test basic connection
-    test_query = session.sql("SELECT CURRENT_ROLE() as role, CURRENT_DATABASE() as database").collect()
-    result = test_query[0]
     st.sidebar.success("✅ Connected to Snowflake")
-    st.sidebar.write(f"👤 Role: {result['ROLE']}")
-    st.sidebar.write(f"📊 Database: {result['DATABASE']}")
-    
-    # Test Cortex Search Service access
-    try:
-        root = Root(session)
-        search_service = (
-            root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-            .schemas["PUBLIC"]
-            .cortex_search_services["FOMC_SEARCH_SERVICE"]
-        )
-        
-        # Quick test search
-        test_resp = search_service.search(query="inflation", columns=["file_name"], limit=1)
-        st.sidebar.success("✅ Cortex Search Service: WORKING")
-        
-    except Exception as e:
-        st.sidebar.error(f"❌ Cortex Search Service: {str(e)}")
-        
 except Exception as e:
     st.error(f"❌ Failed to connect to Snowflake: {e}")
     st.stop()
 
 # --------------------------------------------------
-# 🧠 Retriever Class - INTELLIGENT DATE SORTING
+# 🧠 Advanced Retriever with Smart Filtering
 # --------------------------------------------------
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 10):
+    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 15):
         self._snowpark_session = snowpark_session
         self._limit_to_retrieve = limit_to_retrieve
         self._root = Root(snowpark_session)
 
     def retrieve(self, query: str) -> List[dict]:
         try:
+            # Enhanced query understanding
+            enhanced_query, query_type = self._enhance_query(query)
+            
             search_service = (
                 self._root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
                 .schemas["PUBLIC"]
                 .cortex_search_services["FOMC_SEARCH_SERVICE"]
             )
             
+            # Get more results for better filtering
             resp = search_service.search(
-                query=query, 
+                query=enhanced_query, 
                 columns=["chunk", "file_name"], 
-                limit=self._limit_to_retrieve
+                limit=self._limit_to_retrieve * 3  # Get more for filtering
             )
             
             if resp.results:
                 results = [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
-                # Intelligent sorting based on query context
-                return self._intelligent_sort(results, query)
+                
+                # Apply aggressive filtering and ranking
+                filtered_results = self._filter_low_quality_content(results)
+                deduped_results = self._deduplicate_results(filtered_results)
+                ranked_results = self._rank_results(deduped_results, query, query_type)
+                
+                return ranked_results[:self._limit_to_retrieve]
             return []
             
         except Exception as e:
             st.error(f"❌ Cortex Search Error: {e}")
             return []
 
-    def _intelligent_sort(self, results: List[dict], query: str) -> List[dict]:
-        """Sort results based on query context"""
+    def _enhance_query(self, query: str):
+        """Enhance query and detect query type"""
         query_lower = query.lower()
+        enhanced_query = query
         
-        # Extract year from query if mentioned
-        query_year_match = re.search(r'20[2-3][0-9]', query)
-        query_year = int(query_year_match.group()) if query_year_match else None
-        
-        # Determine sorting strategy based on query intent
+        # Detect query type for specialized handling
         if any(term in query_lower for term in ['most recent', 'latest', 'current', 'newest', 'last']):
-            # For "most recent" queries, prioritize recent documents
-            return self._sort_by_date(results, reverse=True)
-        elif query_year:
-            # For specific year queries, prioritize that year
-            return self._sort_by_relevance_to_year(results, query_year)
-        elif any(term in query_lower for term in ['outlook', 'forecast', 'projection', 'future']):
-            # For future-looking queries, prioritize recent documents
-            return self._sort_by_date(results, reverse=True)
-        elif any(term in query_lower for term in ['historical', 'past', 'back in', 'during']):
-            # For historical queries, prioritize older documents
-            return self._sort_by_date(results, reverse=False)
+            query_type = 'most_recent'
+            enhanced_query += " 2025 2024"  # Boost recent years
+        elif 'beige book' in query_lower:
+            query_type = 'beige_book'
+            enhanced_query += " National Summary economic conditions commentary"
+        elif any(term in query_lower for term in ['outlook', 'forecast', 'projection', '2026', '2025']):
+            query_type = 'economic_outlook'
+            enhanced_query += " projections forecast economic outlook"
+        elif any(term in query_lower for term in ['inflation', 'pce', 'cpi']):
+            query_type = 'inflation'
+            enhanced_query += " projections expectations prices"
+        elif any(term in query_lower for term in ['minutes', 'fomc meeting']):
+            query_type = 'minutes'
+            # Extract year for specific meeting queries
+            year_match = re.search(r'20[2-3][0-9]', query)
+            if year_match:
+                enhanced_query += f" {year_match.group()}"
         else:
-            # Default: mix of relevance and recency
-            return self._balanced_sort(results)
+            query_type = 'general'
+            
+        return enhanced_query, query_type
 
-    def _sort_by_date(self, results: List[dict], reverse: bool = True) -> List[dict]:
-        """Sort by date extracted from filename"""
-        def extract_date(file_name):
-            date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
-            if date_match:
-                year, month, day = date_match.groups()
-                return int(year + month + day)
-            return 0
+    def _filter_low_quality_content(self, results: List[dict]) -> List[dict]:
+        """Aggressively filter out low-quality content"""
+        high_quality_results = []
         
-        return sorted(results, key=lambda x: extract_date(x["file_name"]), reverse=reverse)
-
-    def _sort_by_relevance_to_year(self, results: List[dict], target_year: int) -> List[dict]:
-        """Prioritize documents from the target year"""
-        def year_score(file_name):
-            date_match = re.search(r'(\d{4})', file_name)
-            if date_match:
-                file_year = int(date_match.group(1))
-                # Exact year match gets highest score
-                if file_year == target_year:
-                    return 100
-                # Nearby years get lower scores
-                elif abs(file_year - target_year) == 1:
-                    return 50
-                else:
-                    return 0
-            return 0
+        for result in results:
+            chunk = result["chunk"]
+            if self._is_high_quality_content(chunk):
+                high_quality_results.append(result)
         
-        scored_results = [(year_score(r["file_name"]), r) for r in results]
-        scored_results.sort(key=lambda x: x[0], reverse=True)
-        return [r for score, r in scored_results]
+        # If we filtered out everything, return original results but warn
+        if not high_quality_results and results:
+            st.sidebar.warning("⚠️ Low-quality content detected in results")
+            return results[:5]  # Return limited low-quality results as fallback
+            
+        return high_quality_results
 
-    def _balanced_sort(self, results: List[dict]) -> List[dict]:
-        """Balance recency with relevance"""
-        def combined_score(result):
+    def _is_high_quality_content(self, chunk: str) -> bool:
+        """Identify high-quality economic content vs. metadata/boilerplate"""
+        chunk_lower = chunk.lower()
+        
+        # Low-quality indicators (table of contents, metadata, boilerplate)
+        low_quality_indicators = [
+            'table of contents', '# contents', 'about this publication',
+            'what is the purpose', 'how is the information', 
+            'federal reserve bank of', 'page', 'section', 'img-', '![img',
+            'contents about this', 'this document summarizes', 'outreach for the',
+            'the beige book is intended', 'contacts outside the federal reserve'
+        ]
+        
+        # High-quality indicators (actual economic content)
+        high_quality_indicators = [
+            'national summary', 'staff economic outlook', 'participants\' views',
+            'economic conditions', 'inflation', 'employment', 'unemployment',
+            'growth', 'gdp', 'projections', 'forecast', 'outlook', 'discussion',
+            'real gdp', 'pce price inflation', 'labor market', 'wages',
+            'spending', 'activity', 'prices', 'economic activity',
+            'committee', 'participants', 'staff', 'indicators', 'data'
+        ]
+        
+        # Check for low-quality content
+        low_quality_count = sum(3 for indicator in low_quality_indicators if indicator in chunk_lower)
+        
+        # Check for high-quality content
+        high_quality_count = sum(1 for indicator in high_quality_indicators if indicator in chunk_lower)
+        
+        # Require minimum chunk length and high-quality signals
+        if len(chunk.strip()) < 100:  # Very short chunks are usually low quality
+            return False
+            
+        return high_quality_count > low_quality_count and high_quality_count >= 2
+
+    def _deduplicate_results(self, results: List[dict]) -> List[dict]:
+        """Remove duplicate and near-duplicate results"""
+        seen_chunks = set()
+        unique_results = []
+        
+        for result in results:
+            # Create a normalized version for comparison
+            chunk_normalized = re.sub(r'\s+', ' ', result["chunk"].lower().strip())
+            chunk_hash = hash(chunk_normalized[:500])  # Hash first 500 chars
+            
+            if chunk_hash not in seen_chunks:
+                seen_chunks.add(chunk_hash)
+                unique_results.append(result)
+                
+        return unique_results
+
+    def _rank_results(self, results: List[dict], query: str, query_type: str) -> List[dict]:
+        """Rank results based on multiple factors"""
+        scored_results = []
+        
+        for result in results:
+            score = 0
+            chunk = result["chunk"]
             file_name = result["file_name"]
-            date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
-            if date_match:
-                year, month, day = map(int, date_match.groups())
-                # Recent documents get higher base scores
+            
+            # Content quality score
+            score += self._content_quality_score(chunk)
+            
+            # Temporal relevance score
+            score += self._temporal_score(file_name, query_type)
+            
+            # Query relevance score
+            score += self._query_relevance_score(chunk, query, query_type)
+            
+            # Document type score
+            score += self._document_type_score(file_name, chunk, query_type)
+            
+            scored_results.append((score, result))
+        
+        # Sort by score descending
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        return [result for score, result in scored_results]
+
+    def _content_quality_score(self, chunk: str) -> int:
+        """Score based on content quality and importance"""
+        chunk_lower = chunk.lower()
+        score = 0
+        
+        # High-value sections
+        if 'national summary' in chunk_lower:
+            score += 25
+        elif 'staff economic outlook' in chunk_lower:
+            score += 20
+        elif 'summary of economic projections' in chunk_lower:
+            score += 20
+        elif 'participants\' views' in chunk_lower:
+            score += 15
+            
+        # Economic indicators
+        economic_terms = {
+            'inflation': 3, 'gdp': 3, 'unemployment': 3, 'growth': 2,
+            'projections': 3, 'forecast': 2, 'economic conditions': 3,
+            'labor market': 2, 'prices': 2, 'wages': 2, 'spending': 2
+        }
+        
+        for term, points in economic_terms.items():
+            if term in chunk_lower:
+                score += points
+                
+        return score
+
+    def _temporal_score(self, file_name: str, query_type: str) -> int:
+        """Score based on temporal relevance"""
+        date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
+        if date_match:
+            year, month, day = map(int, date_match.groups())
+            
+            # Strong recency boost for "most recent" queries
+            if query_type == 'most_recent':
                 if year == 2025:
                     return 30
                 elif year == 2024:
-                    return 20
-                elif year == 2023:
                     return 10
-            return 5
+                elif year == 2023:
+                    return 0
+                    
+            # Moderate recency preference for other queries
+            if year == 2025:
+                return 15
+            elif year == 2024:
+                return 8
+            elif year == 2023:
+                return 2
+                
+        return 0
+
+    def _query_relevance_score(self, chunk: str, query: str, query_type: str) -> int:
+        """Score based on query term matching"""
+        query_terms = set(term.lower() for term in query.split() if len(term) > 3)
+        chunk_lower = chunk.lower()
         
-        scored_results = [(combined_score(r), r) for r in results]
-        scored_results.sort(key=lambda x: x[0], reverse=True)
-        return [r for score, r in scored_results]
+        score = 0
+        for term in query_terms:
+            if term in chunk_lower:
+                score += 3
+                
+        # Special handling for query types
+        if query_type == 'beige_book' and 'beigebook' in chunk_lower:
+            score += 10
+        elif query_type == 'economic_outlook' and any(term in chunk_lower for term in ['projections', 'forecast', 'outlook']):
+            score += 8
+            
+        return score
+
+    def _document_type_score(self, file_name: str, chunk: str, query_type: str) -> int:
+        """Score based on document type matching"""
+        file_lower = file_name.lower()
+        chunk_lower = chunk.lower()
+        
+        if query_type == 'beige_book' and 'beigebook' in file_lower:
+            if 'national summary' in chunk_lower:
+                return 20
+            return 10
+        elif query_type == 'economic_outlook' and ('proj' in file_lower or 'sep' in file_lower):
+            return 15
+        elif query_type == 'minutes' and 'minutes' in file_lower:
+            return 10
+            
+        return 0
 
 # --------------------------------------------------
 # 🧹 Utility Functions
@@ -247,16 +353,8 @@ def create_direct_link(file_name: str) -> str:
         base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
     return f"{base_url}{file_name}"
 
-def clean_chunk_content(chunk: str) -> str:
-    """Clean up chunk content for better display"""
-    cleaned = re.sub(r'!\[.*?\]\(.*?\)', '', chunk)  # Remove images
-    cleaned = re.sub(r'#{1,6}\s*', '', cleaned)  # Remove markdown headers
-    cleaned = re.sub(r'\$', '', cleaned)  # Remove math symbols
-    cleaned = re.sub(r'\s+', ' ', cleaned)  # Normalize whitespace
-    return cleaned.strip()
-
 # --------------------------------------------------
-# ✨ RAG Class - OPTIMIZED PERFORMANCE
+# ✨ RAG Class
 # --------------------------------------------------
 class RAG:
     def __init__(self):
@@ -275,18 +373,16 @@ class RAG:
         if not contexts:
             return "No relevant context retrieved."
         
-        # Limit context to avoid timeout - take top 3 most relevant
-        limited_contexts = contexts[:3]
-        chunk_texts = [item["chunk"] for item in limited_contexts]
+        # Use all context but limit total length
+        chunk_texts = [item["chunk"] for item in contexts]
         joined = "\n\n".join(chunk_texts)
         
-        # Limit total characters to prevent timeout
-        if len(joined) > 4000:
-            joined = joined[:4000] + "..."
+        if len(joined) > 6000:
+            joined = joined[:6000] + "..."
         
         prompt = f"""
         You are an expert financial analyst familiar with FOMC policy statements, minutes, and economic outlooks.
-        Summarize the following excerpts clearly and concisely, focusing on the most relevant information.
+        Summarize the following excerpts clearly and concisely, focusing on the most relevant information for answering the user's question.
         Retain key figures, policy stances, economic indicators, dates, and sources of expectations.
         
         Context:
@@ -309,10 +405,12 @@ class RAG:
         You are an expert economic analyst specializing in FOMC communications.
         Current date context: It is currently {current_date}.
         All documents in the provided context are real and current.
-        Do not question the validity or dates of any documents in the context.
         
-        Answer the question in long-form, fully and completely, based on the context. Do not hallucinate.
-        If you don't have the information just say so.
+        Answer the question in long-form, fully and completely, based EXCLUSIVELY on the context provided.
+        Extract and present ALL relevant information from the context.
+        Do not speculate about information that might be missing from the context.
+        Do not question the validity or dates of any documents in the context.
+        If the context contains the information needed to answer the question, provide a complete answer.
         
         Context Summary:
         {summary}
@@ -357,13 +455,10 @@ def answer_question_using_rag(query: str):
                 title = extract_clean_title(file_name)
                 pdf_url = create_direct_link(file_name)
                 
-                # Clean up the chunk content
-                cleaned_chunk = clean_chunk_content(chunk)
-                
                 st.markdown(f"""
                 <div class="context-card">
                     <div class="context-title">{title}</div>
-                    <div class="context-body">{cleaned_chunk[:600]}{'...' if len(cleaned_chunk)>600 else ''}</div>
+                    <div class="context-body">{chunk[:600]}{'...' if len(chunk)>600 else ''}</div>
                     <a href="{pdf_url}" target="_blank" class="source-link">
                         📄 View Full Document: {file_name}
                     </a>
