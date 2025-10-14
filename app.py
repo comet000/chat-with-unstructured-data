@@ -19,13 +19,8 @@ st.markdown("""
     margin-bottom:12px; background-color:#f9f9f9;
     box-shadow: 1px 1px 3px rgba(0,0,0,0.05);
 }
-.context-title {font-weight:600; font-size:15px;}
-.context-body {font-size:13px; line-height:1.5; color:#333; margin-top:6px;}
-mark {
-    background-color: #fff9c4 !important;
-    padding: 0.1em 0.2em;
-    border-radius: 2px;
-}
+.context-title {font-weight:600; font-size:15px; margin-bottom:8px;}
+.context-body {font-size:13px; line-height:1.5; color:#333;}
 .source-link {
     font-size: 12px;
     color: #0059ff;
@@ -35,6 +30,26 @@ mark {
 }
 .source-link:hover {
     text-decoration: underline;
+}
+mark {
+    background-color: #fff9c4 !important;
+    padding: 0.1em 0.2em;
+    border-radius: 2px;
+}
+/* Better table styling */
+.stMarkdown table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+}
+.stMarkdown th, .stMarkdown td {
+    border: 1px solid #ddd;
+    padding: 8px 12px;
+    text-align: left;
+}
+.stMarkdown th {
+    background-color: #f2f2f2;
+    font-weight: 600;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -103,42 +118,35 @@ def dedupe_context_texts(texts: List[dict]) -> List[dict]:
         result.append(item)
     return result
 
-def extract_better_title(chunk: str) -> str:
-    cleaned = fix_text_formatting(chunk)
-    # Look for date patterns
-    date_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(-\d{1,2})?,\s+\d{4}', cleaned)
-    meeting_type = re.search(r'(Staff Economic Outlook|CHAIR POWELL|Minutes of the Federal Open Market Committee|Summary of Economic Projections|Participants\' Views)', cleaned)
-    suffix = ""
+def extract_clean_title(file_name: str, chunk: str) -> str:
+    """Extract a clean title from the file name and first meaningful content"""
+    # Clean the file name for display
+    clean_name = file_name.replace('.pdf', '').replace('_', ' ').title()
+    
+    # Try to extract a date from the file name
+    date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
     if date_match:
-        suffix += f" ({date_match.group(0)})"
-    if meeting_type:
-        suffix += f" - {meeting_type.group(0)}"
-    if suffix:
-        first_sentence = re.split(r'(?<=[\.\!\?])\s', cleaned.strip())[0][:50]
-        return f"{first_sentence}{suffix}"[:100]
+        year, month, day = date_match.groups()
+        clean_name = f"{clean_name} ({month}/{day}/{year})"
     
-    lines = cleaned.split('\n')
-    if lines and re.match(r'^(#|\d{4}|\w+ \d{1,2}, \d{4}|Staff Economic Outlook|FEDERAL RESERVE press release|Voting for|CHAIR POWELL|Minutes of the Federal Open Market Committee|Summary of Economic Projections|Participants\' Views)', lines[0].strip()):
-        return lines[0].strip()[:100] + suffix
+    # Determine document type
+    if 'minutes' in file_name.lower():
+        doc_type = "FOMC Minutes"
+    elif 'proj' in file_name.lower() or 'sep' in file_name.lower():
+        doc_type = "Summary of Economic Projections"
+    elif 'presconf' in file_name.lower():
+        doc_type = "Press Conference"
+    elif 'transcript' in file_name.lower():
+        doc_type = "Meeting Transcript"
+    else:
+        doc_type = "FOMC Document"
     
-    paragraphs = split_paragraphs(cleaned)
-    if paragraphs and len(paragraphs[0].split()) < 15:
-        return paragraphs[0].strip() + suffix
-    
-    # Fallback: Cortex summary title
-    title_prompt = f"Summarize this chunk's topic in 10 words, including any date or meeting: {cleaned[:200]}"
-    title = str(complete("claude-3-5-sonnet", title_prompt, session=session)).strip()
-    return title + suffix
+    return f"{doc_type} - {clean_name}"
 
-def create_search_url(file_name: str, chunk_text: str) -> str:
-    """Create a Google search URL for the document"""
-    # Extract key terms for better search
-    clean_file = file_name.replace('.pdf', '').replace('_', ' ')
-    key_terms = clean_file + " FOMC Federal Reserve"
-    
-    # URL encode the search query
-    search_query = f"{clean_file} {key_terms}".replace(' ', '+')
-    return f"https://www.google.com/search?q={search_query}"
+def create_direct_link(file_name: str) -> str:
+    """Create direct link to Federal Reserve PDF"""
+    base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
+    return f"{base_url}{file_name}"
 
 # Stopwords for highlighting
 STOPWORDS = {"the", "and", "for", "with", "from", "this", "that"}
@@ -193,10 +201,11 @@ class RAG:
             "In your response, specify what was expected or decided, when (e.g., specific meeting dates or projection years), "
             "by whom (e.g., FOMC staff, Chair Powell, the Committee), and why (e.g., based on economic indicators like job gains, inflation data). "
             "Explain policy statements and market implications in simple, accurate terms. Structure responses with bullet points or numbered lists for clarity. "
-            "If comparing figures across time or sources, present in a markdown table. Always cite specific dates/meetings and explain 'why' with evidence from indicators. "
+            "IMPORTANT: When presenting data comparisons, use clean, simple markdown tables with clear headers. Avoid complex table structures."
+            "Always cite specific dates/meetings and explain 'why' with evidence from indicators. "
             "If data is incomplete (e.g., no specifics for a year), explicitly state limitations and suggest why (e.g., 'Docs cover up to 2025, so 2026 is directional only'). "
             "For 'why' explanations, tie to multiple indicators if available (e.g., 'due to tariffs boosting import costs and persistent wage growth'). "
-            "Use tables for any comparisons or progressions; if no table fits, use bullets with sub-bullets for 'why'. "
+            "Use simple tables for any comparisons or progressions; if no table fits, use bullets with sub-bullets for 'why'. "
             "Add market implications where relevant (e.g., 'This could signal... for investors'). "
             "Keep responses concise—aim for 300-500 words max. End with a 1-2 sentence summary of implications. "
             "If the answer cannot be found in the provided materials, politely say you don't have that information; based on 2023-2025 docs.\n\n"
@@ -249,13 +258,28 @@ def answer_question_using_rag(query: str):
                 chunk = item["chunk"]
                 file_name = item["file_name"]
                 cleaned = fix_text_formatting(chunk)
-                paragraphs = split_paragraphs(cleaned)
-                title = extract_better_title(cleaned)
-                body = " ".join(paragraphs[1:]) if len(paragraphs) > 1 and len(paragraphs[0].split()) < 15 else " ".join(paragraphs)
                 
-                if title.lower() in seen_titles:
+                # Get clean title from file name
+                title = extract_clean_title(file_name, cleaned)
+                
+                if title in seen_titles:
                     continue
-                seen_titles.add(title.lower())
+                seen_titles.add(title)
+                
+                # Clean up the context text - remove headings and focus on content
+                paragraphs = split_paragraphs(cleaned)
+                # Skip heading-like paragraphs and get to the actual content
+                content_paragraphs = []
+                for para in paragraphs:
+                    # Skip paragraphs that are just headings or very short
+                    if len(para.split()) > 10 and not para.startswith('#'):
+                        content_paragraphs.append(para)
+                
+                # If we filtered too much, use the original paragraphs
+                if not content_paragraphs:
+                    content_paragraphs = paragraphs
+                
+                body = " ".join(content_paragraphs)
                 
                 # Smarter highlighting: Filter query terms
                 query_words = {w.lower() for w in query.split() if len(w) > 4 and w.lower() not in STOPWORDS}
@@ -263,16 +287,16 @@ def answer_question_using_rag(query: str):
                 for word in query_words:
                     highlighted_body = re.sub(f"({re.escape(word)})", r"<mark>\1</mark>", highlighted_body, flags=re.IGNORECASE)
                 
-                # Create search link
-                search_url = create_search_url(file_name, chunk)
+                # Create direct PDF link
+                pdf_url = create_direct_link(file_name)
                 
                 st.markdown(
                     f"""
                     <div class="context-card">
                         <div class="context-title">{title}</div>
-                        <div class="context-body">{highlighted_body[:700]}{'...' if len(body)>700 else ''}</div>
-                        <a href="{search_url}" target="_blank" class="source-link">
-                            📄 Source: {file_name}
+                        <div class="context-body">{highlighted_body[:600]}{'...' if len(body)>600 else ''}</div>
+                        <a href="{pdf_url}" target="_blank" class="source-link">
+                            📄 View Full Document: {file_name}
                         </a>
                     </div>
                     """,
