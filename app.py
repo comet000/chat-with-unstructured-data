@@ -1,6 +1,6 @@
 import streamlit as st
 import re
-from typing import List, Tuple
+from typing import List
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from snowflake.cortex import complete
@@ -8,7 +8,7 @@ from snowflake.cortex import complete
 # --------------------------------------------------
 # 🧩 Streamlit Page Setup
 # --------------------------------------------------
-st.set_page_config(page_title="Chat with Cortex Search RAG", page_icon="🤖", layout="centered")
+st.set_page_config(page_title="Chat with FOMC Documents", page_icon="💬", layout="centered")
 
 st.markdown("""
 <style>
@@ -19,17 +19,13 @@ st.markdown("""
     border:1px solid #ddd; border-radius:10px; padding:12px; 
     margin-bottom:12px; background-color:#f9f9f9;
     box-shadow: 1px 1px 3px rgba(0,0,0,0.05);
-    transition: background-color 0.3s ease;
-}
-.context-card:hover {
-    background-color: #f0f7ff;
 }
 .context-title {font-weight:600; font-size:15px;}
-.context-body {font-size:14px; line-height:1.6; color:#333; margin-top:6px;}
+.context-body {font-size:13px; line-height:1.5; color:#333; margin-top:6px;}
 </style>
 """, unsafe_allow_html=True)
 
-st.title("💬 Chat with Cortex Search RAG")
+st.title("💬 Chat with FOMC and Economic Policy Documents")
 
 
 # --------------------------------------------------
@@ -47,7 +43,6 @@ def create_snowflake_session():
     }
     return Session.builder.configs(connection_parameters).create()
 
-
 session = create_snowflake_session()
 
 
@@ -55,23 +50,20 @@ session = create_snowflake_session()
 # 🧠 Retriever Class
 # --------------------------------------------------
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 20):
+    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 10):
         self._snowpark_session = snowpark_session
         self._limit_to_retrieve = limit_to_retrieve
 
-    def retrieve(self, query: str) -> List[Tuple[str, str]]:
+    def retrieve(self, query: str) -> List[str]:
         root = Root(self._snowpark_session)
         search_service = (
             root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
             .schemas["PUBLIC"]
             .cortex_search_services["FOMC_SEARCH_SERVICE"]
         )
-
-        resp = search_service.search(
-            query=query, columns=["file_name", "chunk"], limit=self._limit_to_retrieve
-        )
+        resp = search_service.search(query=query, columns=["chunk"], limit=self._limit_to_retrieve)
         if resp.results:
-            return [(r.get("file_name", "Unknown Document"), r["chunk"]) for r in resp.results]
+            return [r["chunk"] for r in resp.results]
         return []
 
 
@@ -81,22 +73,21 @@ class CortexSearchRetriever:
 def fix_text_formatting(text: str) -> str:
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
     text = re.sub(r"([.,!?])([A-Za-z])", r"\1 \2", text)
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
-
 
 def split_paragraphs(text: str) -> List[str]:
     paragraphs = re.split(r"\n{2,}|(?<=[.?!])\s*\n", text)
     return [p.strip() for p in paragraphs if p.strip()]
 
-
-def dedupe_context_texts(chunks: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
+def dedupe_context_texts(texts: List[str]) -> List[str]:
     seen, result = set(), []
-    for source, t in chunks:
+    for t in texts:
         cleaned = re.sub(r"\s+", " ", t.strip().lower())
         if any(cleaned in s or s in cleaned for s in seen):
             continue
         seen.add(cleaned)
-        result.append((source, t))
+        result.append(t)
     return result
 
 
@@ -107,19 +98,19 @@ class RAG:
     def __init__(self):
         self.retriever = CortexSearchRetriever(session)
 
-    def retrieve_context(self, query: str) -> List[Tuple[str, str]]:
+    def retrieve_context(self, query: str) -> List[str]:
         chunks = self.retriever.retrieve(query)
-        return dedupe_context_texts(chunks)
+        chunks = dedupe_context_texts(chunks)
+        return chunks
 
-    def summarize_context(self, contexts: List[Tuple[str, str]]) -> str:
+    def summarize_context(self, contexts: List[str]) -> str:
         if not contexts:
             return "No relevant context retrieved."
-        joined = "\n\n".join(chunk for _, chunk in contexts)
+        joined = "\n\n".join(contexts)
         prompt = (
-            "You are an assistant analyzing excerpts from official Federal Open Market Committee (FOMC) documents. "
-            "Use only the information provided in these excerpts to answer questions or summarize content. "
-            "If the context is insufficient or the answer is unclear, explicitly say so. "
-            "Focus on providing precise, well-structured, and factual information.\n\n"
+            "You are an expert financial analyst familiar with FOMC policy statements, "
+            "minutes, and economic outlooks. Summarize the following excerpts clearly, "
+            "retaining key figures, policy stances, and economic indicators:\n\n"
             f"{joined}"
         )
         summary = complete("claude-3-5-sonnet", prompt, session=session)
@@ -128,9 +119,11 @@ class RAG:
     def build_messages_with_context(self, messages, context):
         summary = self.summarize_context(context)
         system_content = (
-            f"You have retrieved the following summarized context:\n{summary}\n\n"
-            "Use this information to answer the user's question as accurately as possible. "
-            "Cite relevant excerpts or summarize them clearly, and if the context does not include an answer, say so."
+            "You are an expert economic analyst specializing in FOMC communications. "
+            "Use the following summarized context from official FOMC documents to answer the user's question clearly and conversationally. "
+            "Explain policy statements and market implications in simple, accurate terms. "
+            "If the answer cannot be found in the provided materials, politely say you don't have that information.\n\n"
+            f"Context Summary:\n{summary}"
         )
         updated = list(messages)
         updated.append({"role": "system", "content": system_content})
@@ -170,7 +163,7 @@ display_messages()
 # ⚙️ Main RAG Interaction
 # --------------------------------------------------
 def answer_question_using_rag(query: str):
-    with st.spinner("Retrieving relevant excerpts..."):
+    with st.spinner("Retrieving context..."):
         chunks = rag.retrieve_context(query)
 
     # 💡 Display retrieved context
@@ -179,21 +172,29 @@ def answer_question_using_rag(query: str):
             st.info("No relevant context retrieved.")
         else:
             seen_titles = set()
-            for i, (source, chunk) in enumerate(chunks):
+            for i, chunk in enumerate(chunks):
                 cleaned = fix_text_formatting(chunk)
                 paragraphs = split_paragraphs(cleaned)
-                title = f"Excerpt {i+1} — {source}"
+
+                if len(paragraphs[0].split()) < 10:
+                    title = paragraphs[0].strip()
+                    body = " ".join(paragraphs[1:])
+                else:
+                    title = f"Excerpt {i+1}"
+                    body = " ".join(paragraphs)
 
                 if title.lower() in seen_titles:
                     continue
                 seen_titles.add(title.lower())
 
-                body = " ".join(paragraphs)
                 st.markdown(
                     f"""
                     <div class="context-card">
                         <div class="context-title">{title}</div>
                         <div class="context-body">{body[:700]}{'...' if len(body)>700 else ''}</div>
+                        <div style="font-size:11px; color:#666; margin-top:6px;">
+                            Source: FOMC_SEARCH_SERVICE
+                        </div>
                     </div>
                     """,
                     unsafe_allow_html=True,
@@ -204,10 +205,6 @@ def answer_question_using_rag(query: str):
     with st.spinner("Generating response..."):
         stream = rag.generate_completion_stream(updated_messages)
 
-    if chunks:
-        unique_sources = {s for s, _ in chunks}
-        st.caption(f"Sources: {', '.join(unique_sources)}")
-
     return stream
 
 
@@ -215,7 +212,7 @@ def answer_question_using_rag(query: str):
 # 🚀 Main Chat Loop
 # --------------------------------------------------
 def main():
-    user_input = st.chat_input("Ask a question about FOMC documents (2023–2025)...")
+    user_input = st.chat_input("Ask about FOMC policy, inflation outlook, or meeting summaries...")
     if user_input:
         st.chat_message("user").write(user_input)
         st.session_state.messages.append({"role": "user", "content": user_input})
