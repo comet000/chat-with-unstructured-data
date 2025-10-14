@@ -8,7 +8,7 @@ from snowflake.cortex import complete
 # --------------------------------------------------
 # 🧩 Streamlit Page Setup
 # --------------------------------------------------
-st.set_page_config(page_title="Chat with the Federal Reserve", page_icon="💬", layout="centered")
+st.set_page_config(page_title="Chat with FOMC Documents", page_icon="💬", layout="centered")
 st.markdown("""
 <style>
 .stChatMessage {font-family: 'Inter', sans-serif; font-size: 15px;}
@@ -31,6 +31,11 @@ st.markdown("""
 .source-link:hover {
     text-decoration: underline;
 }
+mark {
+    background-color: #fff9c4 !important;
+    padding: 0.1em 0.2em;
+    border-radius: 2px;
+}
 /* Better table styling */
 .stMarkdown table {
     border-collapse: collapse;
@@ -48,8 +53,7 @@ st.markdown("""
 }
 </style>
 """, unsafe_allow_html=True)
-st.title("💬 Chat with the Federal Reserve")
-st.markdown("**RAG chat on all FOMC PDFs between 2023 - 2025**")
+st.title("💬 Chat with FOMC and Economic Policy Documents")
 
 # --------------------------------------------------
 # 🔑 Snowflake Session
@@ -60,25 +64,15 @@ def create_snowflake_session():
         "user": st.secrets["user"],
         "password": st.secrets["password"],
         "warehouse": st.secrets["warehouse"],
-        "database": st.secrets["database"],  # Make sure this is set
-        "schema": st.secrets["schema"],      # Make sure this is set
+        "database": st.secrets["database"],
+        "schema": st.secrets["schema"],
         "role": st.secrets["role"],
     }
     return Session.builder.configs(connection_parameters).create()
-
-try:
-    session = create_snowflake_session()
-    # Test the connection with a simple query
-    test_df = session.sql("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()
-    st.sidebar.success(f"✅ Connected to Snowflake")
-    st.sidebar.write(f"Database: {test_df[0][0]}")
-    st.sidebar.write(f"Schema: {test_df[0][1]}")
-except Exception as e:
-    st.error(f"❌ Failed to connect to Snowflake: {e}")
-    st.stop()
+session = create_snowflake_session()
 
 # --------------------------------------------------
-# 🧠 Retriever Class - FIXED VERSION
+# 🧠 Retriever Class
 # --------------------------------------------------
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 10):
@@ -86,61 +80,16 @@ class CortexSearchRetriever:
         self._limit_to_retrieve = limit_to_retrieve
 
     def retrieve(self, query: str) -> List[dict]:
-        try:
-            # First, let's verify the search service exists
-            root = Root(self._snowpark_session)
-            
-            # Use fully qualified names to avoid context issues
-            search_service = (
-                root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-                .schemas["PUBLIC"]
-                .cortex_search_services["FOMC_SEARCH_SERVICE"]
-            )
-            
-            # Perform the search
-            resp = search_service.search(
-                query=query, 
-                columns=["chunk", "file_name"], 
-                limit=self._limit_to_retrieve
-            )
-            
-            if resp.results:
-                return [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
-            return []
-            
-        except Exception as e:
-            st.error(f"❌ Error retrieving data: {e}")
-            
-            # Fallback: Try SQL-based approach
-            st.info("🔄 Trying SQL fallback approach...")
-            try:
-                return self._sql_fallback(query)
-            except Exception as fallback_error:
-                st.error(f"❌ SQL fallback also failed: {fallback_error}")
-                return []
-
-    def _sql_fallback(self, query: str) -> List[dict]:
-        """Fallback using direct SQL queries"""
-        sql = f"""
-        WITH search_results AS (
-            SELECT 
-                chunk,
-                file_name,
-                VECTOR_COSINE_SIMILARITY(
-                    snowflake.arctic.embed_text('snowflake-arctic-embed-l-v2.0', chunk),
-                    snowflake.arctic.embed_text('snowflake-arctic-embed-l-v2.0', '{query.replace("'", "''")}')
-                ) as similarity
-            FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_CONTENT
-            ORDER BY similarity DESC
-            LIMIT {self._limit_to_retrieve}
+        root = Root(self._snowpark_session)
+        search_service = (
+            root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
+            .schemas["PUBLIC"]
+            .cortex_search_services["FOMC_SEARCH_SERVICE"]
         )
-        SELECT chunk, file_name
-        FROM search_results
-        WHERE similarity > 0.1  -- Basic relevance threshold
-        """
-        
-        df = self._snowpark_session.sql(sql).collect()
-        return [{"chunk": row["CHUNK"], "file_name": row["FILE_NAME"]} for row in df]
+        resp = search_service.search(query=query, columns=["chunk", "file_name"], limit=self._limit_to_retrieve)
+        if resp.results:
+            return [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
+        return []
 
 # --------------------------------------------------
 # 🧹 Utility Functions
@@ -169,22 +118,16 @@ def dedupe_context_texts(texts: List[dict]) -> List[dict]:
         result.append(item)
     return result
 
-def extract_clean_title(file_name: str) -> str:
-    """Extract a clean title from the file name"""
-    # Extract date from filename
+def extract_clean_title(file_name: str, chunk: str) -> str:
+    """Extract a clean title from the file name and first meaningful content"""
+    # Clean the file name for display
+    clean_name = file_name.replace('.pdf', '').replace('_', ' ').title()
+    
+    # Try to extract a date from the file name
     date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
     if date_match:
         year, month, day = date_match.groups()
-        # Convert month number to month name
-        month_names = {
-            '01': 'January', '02': 'February', '03': 'March', '04': 'April',
-            '05': 'May', '06': 'June', '07': 'July', '08': 'August',
-            '09': 'September', '10': 'October', '11': 'November', '12': 'December'
-        }
-        month_name = month_names.get(month, month)
-        formatted_date = f"{month_name} {int(day)}, {year}"
-    else:
-        formatted_date = "Unknown Date"
+        clean_name = f"{clean_name} ({month}/{day}/{year})"
     
     # Determine document type
     if 'minutes' in file_name.lower():
@@ -195,31 +138,18 @@ def extract_clean_title(file_name: str) -> str:
         doc_type = "Press Conference"
     elif 'transcript' in file_name.lower():
         doc_type = "Meeting Transcript"
-    elif 'statement' in file_name.lower():
-        doc_type = "Policy Statement"
     else:
         doc_type = "FOMC Document"
     
-    return f"{doc_type} - {formatted_date}"
+    return f"{doc_type} - {clean_name}"
 
 def create_direct_link(file_name: str) -> str:
-    """Create direct link to Federal Reserve PDF with correct base URL"""
-    # Different document types have different base URLs
-    if 'presconf' in file_name.lower():
-        base_url = "https://www.federalreserve.gov/mediacenter/files/"
-    elif 'minutes' in file_name.lower():
-        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
-    elif 'proj' in file_name.lower() or 'sep' in file_name.lower():
-        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
-    elif 'statement' in file_name.lower():
-        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
-    elif 'transcript' in file_name.lower():
-        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
-    else:
-        # Default to monetarypolicy for unknown types
-        base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
-    
+    """Create direct link to Federal Reserve PDF"""
+    base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
     return f"{base_url}{file_name}"
+
+# Stopwords for highlighting
+STOPWORDS = {"the", "and", "for", "with", "from", "this", "that"}
 
 # --------------------------------------------------
 # ✨ RAG Class
@@ -234,8 +164,6 @@ class RAG:
         if query in st.session_state.rag_cache:
             return st.session_state.rag_cache[query]["chunks"]
         chunks_with_metadata = self.retriever.retrieve(query)
-        if not chunks_with_metadata:
-            return []
         chunks_with_metadata = dedupe_context_texts(chunks_with_metadata)
         st.session_state.rag_cache[query] = {"chunks": chunks_with_metadata[:5]}
         return chunks_with_metadata[:5]
@@ -260,13 +188,10 @@ class RAG:
             "Differentiate staff vs. Committee/Chair views. Organize by timeline, meeting date, or projection year where possible:\n\n"
             f"{joined}"
         )
-        try:
-            summary = complete("claude-3-5-sonnet", prompt, session=session)
-            summary_str = str(summary).strip()
-            st.session_state.rag_cache[query]["summary"] = summary_str
-            return summary_str
-        except Exception as e:
-            return f"Error generating summary: {e}"
+        summary = complete("claude-3-5-sonnet", prompt, session=session)
+        summary_str = str(summary).strip()
+        st.session_state.rag_cache[query]["summary"] = summary_str
+        return summary_str
 
     def build_messages_with_context(self, messages, context):
         summary = self.summarize_context(context)
@@ -291,11 +216,7 @@ class RAG:
         return updated
 
     def generate_completion_stream(self, messages):
-        try:
-            return complete("claude-3-5-sonnet", messages, stream=True, session=session)
-        except Exception as e:
-            st.error(f"Error generating completion: {e}")
-            return [f"Error: Unable to generate response. Please check the search service configuration."]
+        return complete("claude-3-5-sonnet", messages, stream=True, session=session)
 
 rag = RAG()
 
@@ -330,10 +251,7 @@ def answer_question_using_rag(query: str):
     # 💡 Display retrieved context
     with st.expander("🔍 See Retrieved Context"):
         if not chunks_with_metadata:
-            st.info("No relevant context retrieved. This may be because:")
-            st.info("1. The Cortex Search Service is not properly configured")
-            st.info("2. Your role doesn't have access to the service")
-            st.info("3. There are no documents matching your query")
+            st.info("No relevant context retrieved.")
         else:
             seen_titles = set()
             for item in chunks_with_metadata:
@@ -342,7 +260,7 @@ def answer_question_using_rag(query: str):
                 cleaned = fix_text_formatting(chunk)
                 
                 # Get clean title from file name
-                title = extract_clean_title(file_name)
+                title = extract_clean_title(file_name, cleaned)
                 
                 if title in seen_titles:
                     continue
@@ -363,6 +281,12 @@ def answer_question_using_rag(query: str):
                 
                 body = " ".join(content_paragraphs)
                 
+                # Smarter highlighting: Filter query terms
+                query_words = {w.lower() for w in query.split() if len(w) > 4 and w.lower() not in STOPWORDS}
+                highlighted_body = body
+                for word in query_words:
+                    highlighted_body = re.sub(f"({re.escape(word)})", r"<mark>\1</mark>", highlighted_body, flags=re.IGNORECASE)
+                
                 # Create direct PDF link
                 pdf_url = create_direct_link(file_name)
                 
@@ -370,7 +294,7 @@ def answer_question_using_rag(query: str):
                     f"""
                     <div class="context-card">
                         <div class="context-title">{title}</div>
-                        <div class="context-body">{body[:600]}{'...' if len(body)>600 else ''}</div>
+                        <div class="context-body">{highlighted_body[:600]}{'...' if len(body)>600 else ''}</div>
                         <a href="{pdf_url}" target="_blank" class="source-link">
                             📄 View Full Document: {file_name}
                         </a>
@@ -378,9 +302,6 @@ def answer_question_using_rag(query: str):
                     """,
                     unsafe_allow_html=True,
                 )
-
-    if not chunks_with_metadata:
-        return ["I couldn't retrieve any relevant documents. Please check if the Cortex Search Service is properly configured."]
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, chunks_with_metadata)
     with st.spinner("Generating response..."):
