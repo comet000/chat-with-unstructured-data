@@ -65,7 +65,39 @@ def create_snowflake_session():
         "role": st.secrets["role"],
     }
     return Session.builder.configs(connection_parameters).create()
-session = create_snowflake_session()
+
+try:
+    session = create_snowflake_session()
+    st.sidebar.success("✅ Connected to Snowflake")
+except Exception as e:
+    st.error(f"❌ Failed to connect to Snowflake: {e}")
+    st.stop()
+
+# --------------------------------------------------
+# 🔍 Check Available Search Services
+# --------------------------------------------------
+def list_search_services():
+    """List all available Cortex Search Services"""
+    try:
+        root = Root(session)
+        database = root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
+        schema = database.schemas["PUBLIC"]
+        services = list(schema.cortex_search_services)
+        return services
+    except Exception as e:
+        st.error(f"Error listing search services: {e}")
+        return []
+
+# Display available search services in sidebar
+with st.sidebar:
+    st.subheader("Search Services")
+    services = list_search_services()
+    if services:
+        st.write("Available services:")
+        for service in services:
+            st.write(f"- {service.name}")
+    else:
+        st.warning("No search services found")
 
 # --------------------------------------------------
 # 🧠 Retriever Class
@@ -76,16 +108,26 @@ class CortexSearchRetriever:
         self._limit_to_retrieve = limit_to_retrieve
 
     def retrieve(self, query: str) -> List[dict]:
-        root = Root(self._snowpark_session)
-        search_service = (
-            root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-            .schemas["PUBLIC"]
-            .cortex_search_services["FOMC_SEARCH_SERVICE"]
-        )
-        resp = search_service.search(query=query, columns=["chunk", "file_name"], limit=self._limit_to_retrieve)
-        if resp.results:
-            return [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
-        return []
+        try:
+            root = Root(self._snowpark_session)
+            search_service = (
+                root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
+                .schemas["PUBLIC"]
+                .cortex_search_services["FOMC_SEARCH_SERVICE"]
+            )
+            resp = search_service.search(query=query, columns=["chunk", "file_name"], limit=self._limit_to_retrieve)
+            if resp.results:
+                return [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
+            return []
+        except Exception as e:
+            st.error(f"❌ Error retrieving data: {e}")
+            st.info("""
+            **Troubleshooting steps:**
+            1. Check if the Cortex Search Service exists
+            2. Verify your role has access to the service
+            3. Ensure the service is in the CORTEX_SEARCH_TUTORIAL_DB.PUBLIC schema
+            """)
+            return []
 
 # --------------------------------------------------
 # 🧹 Utility Functions
@@ -179,6 +221,8 @@ class RAG:
         if query in st.session_state.rag_cache:
             return st.session_state.rag_cache[query]["chunks"]
         chunks_with_metadata = self.retriever.retrieve(query)
+        if not chunks_with_metadata:
+            return []
         chunks_with_metadata = dedupe_context_texts(chunks_with_metadata)
         st.session_state.rag_cache[query] = {"chunks": chunks_with_metadata[:5]}
         return chunks_with_metadata[:5]
@@ -203,10 +247,13 @@ class RAG:
             "Differentiate staff vs. Committee/Chair views. Organize by timeline, meeting date, or projection year where possible:\n\n"
             f"{joined}"
         )
-        summary = complete("claude-3-5-sonnet", prompt, session=session)
-        summary_str = str(summary).strip()
-        st.session_state.rag_cache[query]["summary"] = summary_str
-        return summary_str
+        try:
+            summary = complete("claude-3-5-sonnet", prompt, session=session)
+            summary_str = str(summary).strip()
+            st.session_state.rag_cache[query]["summary"] = summary_str
+            return summary_str
+        except Exception as e:
+            return f"Error generating summary: {e}"
 
     def build_messages_with_context(self, messages, context):
         summary = self.summarize_context(context)
@@ -231,7 +278,11 @@ class RAG:
         return updated
 
     def generate_completion_stream(self, messages):
-        return complete("claude-3-5-sonnet", messages, stream=True, session=session)
+        try:
+            return complete("claude-3-5-sonnet", messages, stream=True, session=session)
+        except Exception as e:
+            st.error(f"Error generating completion: {e}")
+            return [f"Error: Unable to generate response. Please check the search service configuration."]
 
 rag = RAG()
 
@@ -266,7 +317,10 @@ def answer_question_using_rag(query: str):
     # 💡 Display retrieved context
     with st.expander("🔍 See Retrieved Context"):
         if not chunks_with_metadata:
-            st.info("No relevant context retrieved.")
+            st.info("No relevant context retrieved. This may be because:")
+            st.info("1. The Cortex Search Service is not properly configured")
+            st.info("2. Your role doesn't have access to the service")
+            st.info("3. There are no documents matching your query")
         else:
             seen_titles = set()
             for item in chunks_with_metadata:
@@ -311,6 +365,9 @@ def answer_question_using_rag(query: str):
                     """,
                     unsafe_allow_html=True,
                 )
+
+    if not chunks_with_metadata:
+        return ["I couldn't retrieve any relevant documents. Please check if the Cortex Search Service is properly configured."]
 
     updated_messages = rag.build_messages_with_context(st.session_state.messages, chunks_with_metadata)
     with st.spinner("Generating response..."):
