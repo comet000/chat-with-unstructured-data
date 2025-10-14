@@ -1,6 +1,7 @@
 import streamlit as st
 import re
 from typing import List
+from datetime import datetime
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from snowflake.cortex import complete
@@ -97,10 +98,10 @@ except Exception as e:
     st.stop()
 
 # --------------------------------------------------
-# 🧠 Retriever Class - INTELLIGENT RANKING
+# 🧠 Retriever Class - SIMPLIFIED
 # --------------------------------------------------
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 15):
+    def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 10):
         self._snowpark_session = snowpark_session
         self._limit_to_retrieve = limit_to_retrieve
         self._root = Root(snowpark_session)
@@ -113,7 +114,6 @@ class CortexSearchRetriever:
                 .cortex_search_services["FOMC_SEARCH_SERVICE"]
             )
             
-            # Get more results so we can filter and rank them properly
             resp = search_service.search(
                 query=query, 
                 columns=["chunk", "file_name"], 
@@ -121,107 +121,12 @@ class CortexSearchRetriever:
             )
             
             if resp.results:
-                results = [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
-                
-                # Apply intelligent ranking and filtering
-                ranked_results = self._rank_and_filter_results(results, query)
-                return ranked_results
+                return [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
             return []
             
         except Exception as e:
             st.error(f"❌ Cortex Search Error: {e}")
             return []
-
-    def _rank_and_filter_results(self, results: List[dict], query: str) -> List[dict]:
-        """Intelligently rank and filter results for better relevance"""
-        scored_results = []
-        
-        for result in results:
-            score = 0
-            chunk = result["chunk"]
-            file_name = result["file_name"]
-            
-            # Score based on content quality (penalize table of contents, images)
-            if self._is_high_quality_content(chunk):
-                score += 10
-            
-            # Score based on recency
-            score += self._get_recency_score(file_name)
-            
-            # Score based on query relevance
-            score += self._get_query_relevance_score(chunk, query)
-            
-            # Score based on document type importance
-            score += self._get_document_importance_score(file_name)
-            
-            scored_results.append((score, result))
-        
-        # Sort by score descending and take top 5
-        scored_results.sort(key=lambda x: x[0], reverse=True)
-        return [result for score, result in scored_results[:5]]
-
-    def _is_high_quality_content(self, chunk: str) -> bool:
-        """Filter out low-quality content like table of contents"""
-        chunk_lower = chunk.lower()
-        
-        # Penalize table of contents, images, formatting
-        low_quality_indicators = [
-            'table of contents', 'contents', 'img-', '![img', '# contents',
-            'federal reserve bank of', 'page', 'section'
-        ]
-        
-        # Look for actual economic content
-        high_quality_indicators = [
-            'economic', 'growth', 'inflation', 'employment', 'outlook',
-            'projections', 'forecast', 'expect', 'committee', 'participants',
-            'staff', 'indicators', 'data', 'survey', 'conditions'
-        ]
-        
-        low_quality_count = sum(1 for indicator in low_quality_indicators if indicator in chunk_lower)
-        high_quality_count = sum(1 for indicator in high_quality_indicators if indicator in chunk_lower)
-        
-        return high_quality_count > low_quality_count
-
-    def _get_recency_score(self, file_name: str) -> int:
-        """Score based on how recent the document is"""
-        date_match = re.search(r'(\d{4})(\d{2})(\d{2})', file_name)
-        if date_match:
-            year, month, day = map(int, date_match.groups())
-            # Higher score for more recent documents
-            if year == 2025:
-                return 20
-            elif year == 2024:
-                return 10
-            elif year == 2023:
-                return 5
-        return 0
-
-    def _get_query_relevance_score(self, chunk: str, query: str) -> int:
-        """Score based on how relevant the chunk is to the query"""
-        query_terms = set(term.lower() for term in query.split() if len(term) > 3)
-        chunk_lower = chunk.lower()
-        
-        score = 0
-        for term in query_terms:
-            if term in chunk_lower:
-                score += 5
-                
-        return score
-
-    def _get_document_importance_score(self, file_name: str) -> int:
-        """Score based on document type importance"""
-        file_lower = file_name.lower()
-        
-        if 'minutes' in file_lower:
-            return 8  # Meeting minutes are very important
-        elif 'beigebook' in file_lower:
-            return 7  # Beige Books are important economic snapshots
-        elif 'proj' in file_lower or 'sep' in file_lower:
-            return 9  # Economic projections are highly important
-        elif 'presconf' in file_lower:
-            return 6  # Press conferences are important
-        else:
-            return 5  # Default score for other documents
 
 # --------------------------------------------------
 # 🧹 Utility Functions
@@ -266,7 +171,6 @@ def create_direct_link(file_name: str) -> str:
 
 def clean_chunk_content(chunk: str) -> str:
     """Clean up chunk content for better display"""
-    # Remove images and markdown formatting
     cleaned = re.sub(r'!\[.*?\]\(.*?\)', '', chunk)  # Remove images
     cleaned = re.sub(r'#{1,6}\s*', '', cleaned)  # Remove markdown headers
     cleaned = re.sub(r'\$', '', cleaned)  # Remove math symbols
@@ -310,8 +214,13 @@ class RAG:
 
     def build_messages_with_context(self, messages, context):
         summary = self.summarize_context(context)
+        current_date = datetime.now().strftime("%B %d, %Y")
+        
         system_content = (
             "You are an expert economic analyst specializing in FOMC communications. "
+            f"Current date context: It is currently {current_date}. "
+            "All documents in the provided context are real and current. "
+            "Do not question the validity or dates of any documents in the context. "
             "Use the following summarized context from official FOMC documents to answer the user's question.\n\n"
             f"Context Summary:\n{summary}"
         )
