@@ -80,7 +80,8 @@ def dedupe_context_texts(texts: List[str]) -> List[str]:
     seen, result = set(), []
     for t in texts:
         cleaned = re.sub(r"\s+", " ", t.strip().lower())
-        if any(cleaned in s or s in cleaned for s in seen):
+        # Simple check for high overlap (e.g., if >80% substring match)
+        if any(sum(1 for w in cleaned.split() if w in s.split()) / len(cleaned.split()) > 0.8 for s in seen):
             continue
         seen.add(cleaned)
         result.append(t)
@@ -88,22 +89,33 @@ def dedupe_context_texts(texts: List[str]) -> List[str]:
 
 def extract_better_title(chunk: str) -> str:
     cleaned = fix_text_formatting(chunk)
-    # Look for date patterns like "January 31-February 1, 2023" or "YYYY-MM-DD"
+    # Look for date patterns
     date_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(-\d{1,2})?,\s+\d{4}', cleaned)
+    meeting_type = re.search(r'(Staff Economic Outlook|CHAIR POWELL|Minutes of the Federal Open Market Committee|Summary of Economic Projections|Participants\' Views)', cleaned)
+    suffix = ""
     if date_match:
-        return f"{date_match.group(0)} Excerpt"
+        suffix += f" ({date_match.group(0)})"
+    if meeting_type:
+        suffix += f" - {meeting_type.group(0)}"
+    if suffix:
+        first_sentence = re.split(r'(?<=[\.\!\?])\s', cleaned.strip())[0][:50]
+        return f"{first_sentence}{suffix}"[:100]
     
     lines = cleaned.split('\n')
     if lines and re.match(r'^(#|\d{4}|\w+ \d{1,2}, \d{4}|Staff Economic Outlook|FEDERAL RESERVE press release|Voting for|CHAIR POWELL|Minutes of the Federal Open Market Committee|Summary of Economic Projections|Participants\' Views)', lines[0].strip()):
-        return lines[0].strip()[:100]
+        return lines[0].strip()[:100] + suffix
     
     paragraphs = split_paragraphs(cleaned)
     if paragraphs and len(paragraphs[0].split()) < 15:
-        return paragraphs[0].strip()
+        return paragraphs[0].strip() + suffix
     
-    # Fallback: First sentence, cleaned
-    first_sentence = re.split(r'(?<=[\.\!\?])\s', cleaned.strip())[0][:100]
-    return first_sentence + '...' if len(first_sentence) > 100 else first_sentence
+    # Fallback: Cortex summary title
+    title_prompt = f"Summarize this chunk's topic in 10 words, including any date or meeting: {cleaned[:200]}"
+    title = str(complete("claude-3-5-sonnet", title_prompt, session=session)).strip()
+    return title + suffix
+
+# Stopwords for highlighting
+STOPWORDS = {"the", "and", "for", "with", "from", "this", "that"}
 
 # --------------------------------------------------
 # ✨ RAG Class
@@ -111,20 +123,21 @@ def extract_better_title(chunk: str) -> str:
 class RAG:
     def __init__(self):
         self.retriever = CortexSearchRetriever(session)
+        if "rag_cache" not in st.session_state:
+            st.session_state.rag_cache = {}  # Cache for chunks and summaries per query
 
     def retrieve_context(self, query: str) -> List[str]:
+        if query in st.session_state.rag_cache:
+            return st.session_state.rag_cache[query]["chunks"]
         chunks = self.retriever.retrieve(query)
         chunks = dedupe_context_texts(chunks)
-        # Optional: Simple reranking via Cortex if needed (commented for performance; enable if latency allows)
-        # if chunks:
-        #     joined = "\n\n".join([f"Chunk {i}: {c}" for i, c in enumerate(chunks)])
-        #     rerank_prompt = f"Rank these chunks 1-5 by relevance to query '{query}': {joined}. Return only the top 5 chunk numbers separated by commas."
-        #     rerank = complete("claude-3-5-sonnet", rerank_prompt, session=session)
-        #     top_indices = [int(x.strip()) for x in str(rerank).split(',')[:5]]
-        #     chunks = [chunks[i] for i in top_indices if i < len(chunks)]
-        return chunks[:5]  # Limit to top 5
+        st.session_state.rag_cache[query] = {"chunks": chunks[:5]}
+        return chunks[:5]
 
     def summarize_context(self, contexts: List[str]) -> str:
+        query = list(st.session_state.rag_cache.keys())[-1]  # Assume last query
+        if "summary" in st.session_state.rag_cache.get(query, {}):
+            return st.session_state.rag_cache[query]["summary"]
         if not contexts:
             return "No relevant context retrieved."
         joined = "\n\n".join(contexts)
@@ -133,11 +146,14 @@ class RAG:
             "minutes, and economic outlooks. Summarize the following excerpts clearly and concisely, "
             "retaining key figures, policy stances, economic indicators, dates, and sources of expectations "
             "(e.g., staff projections vs. participant views, Chair statements). Include any dissenting views or risks. "
-            "Organize by timeline, meeting date, or projection year where possible:\n\n"
+            "Flag any contradictions or evolutions across chunks (e.g., 'Projections revised up from Dec to March due to...'). "
+            "Differentiate staff vs. Committee/Chair views. Organize by timeline, meeting date, or projection year where possible:\n\n"
             f"{joined}"
         )
         summary = complete("claude-3-5-sonnet", prompt, session=session)
-        return str(summary).strip()
+        summary_str = str(summary).strip()
+        st.session_state.rag_cache[query]["summary"] = summary_str
+        return summary_str
 
     def build_messages_with_context(self, messages, context):
         summary = self.summarize_context(context)
@@ -148,7 +164,12 @@ class RAG:
             "by whom (e.g., FOMC staff, Chair Powell, the Committee), and why (e.g., based on economic indicators like job gains, inflation data). "
             "Explain policy statements and market implications in simple, accurate terms. Structure responses with bullet points or numbered lists for clarity. "
             "If comparing figures across time or sources, present in a markdown table. Always cite specific dates/meetings and explain 'why' with evidence from indicators. "
-            "Keep responses concise—aim for 300-500 words max. If the answer cannot be found in the provided materials, politely say you don't have that information.\n\n"
+            "If data is incomplete (e.g., no specifics for a year), explicitly state limitations and suggest why (e.g., 'Docs cover up to 2025, so 2026 is directional only'). "
+            "For 'why' explanations, tie to multiple indicators if available (e.g., 'due to tariffs boosting import costs and persistent wage growth'). "
+            "Use tables for any comparisons or progressions; if no table fits, use bullets with sub-bullets for 'why'. "
+            "Add market implications where relevant (e.g., 'This could signal... for investors'). "
+            "Keep responses concise—aim for 300-500 words max. End with a 1-2 sentence summary of implications. "
+            "If the answer cannot be found in the provided materials, politely say you don't have that information; based on 2023-2025 docs.\n\n"
             f"Context Summary:\n{summary}"
         )
         updated = list(messages)
@@ -156,6 +177,9 @@ class RAG:
         return updated
 
     def generate_completion_stream(self, messages):
+        # Optional: Internal verification (commented for perf; enable if needed)
+        # verify_prompt = f"Verify this response draft against context summary: No hallucinations; cite only from context. Draft: {messages[-1]['content']}"
+        # verified = complete("claude-3-5-sonnet", verify_prompt, session=session)
         return complete("claude-3-5-sonnet", messages, stream=True, session=session)
 
 rag = RAG()
@@ -168,6 +192,7 @@ if "messages" not in st.session_state:
 
 if st.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
+    st.session_state.rag_cache = {}
 
 def display_messages():
     for m in st.session_state.messages:
@@ -192,7 +217,7 @@ def answer_question_using_rag(query: str):
         if not chunks:
             st.info("No relevant context retrieved.")
         else:
-            st.info("Showing top 5 relevant excerpts from FOMC documents (ranked by similarity).")
+            st.info("Showing top 5 relevant excerpts from FOMC documents (ranked by similarity). Click to expand for sources.")
             seen_titles = set()
             for chunk in chunks:
                 cleaned = fix_text_formatting(chunk)
@@ -202,10 +227,10 @@ def answer_question_using_rag(query: str):
                 if title.lower() in seen_titles:
                     continue
                 seen_titles.add(title.lower())
-                # Optional: Highlight query terms (simple regex for demo)
-                for word in query.split():
-                    if len(word) > 3:
-                        body = re.sub(f"({re.escape(word)})", r"<mark>\1</mark>", body, flags=re.IGNORECASE)
+                # Smarter highlighting: Filter query terms
+                query_words = {w.lower() for w in query.split() if len(w) > 4 and w.lower() not in STOPWORDS}
+                for word in query_words:
+                    body = re.sub(f"({re.escape(word)})", r"<mark>\1</mark>", body, flags=re.IGNORECASE)
                 st.markdown(
                     f"""
                     <div class="context-card">
