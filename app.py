@@ -68,6 +68,8 @@ def fix_text_formatting(text: str) -> str:
     text = re.sub(r"([a-z])([A-Z])", r"\1 \2", text)
     text = re.sub(r"([.,!?])([A-Za-z])", r"\1 \2", text)
     text = re.sub(r"\s+", " ", text)
+    # Clean up math mode artifacts
+    text = re.sub(r"\$", "", text)
     return text.strip()
 
 def split_paragraphs(text: str) -> List[str]:
@@ -85,16 +87,23 @@ def dedupe_context_texts(texts: List[str]) -> List[str]:
     return result
 
 def extract_better_title(chunk: str) -> str:
-    # Improved title extraction: Look for headers, dates, or key phrases
-    lines = chunk.split('\n')
-    if lines and re.match(r'^(#|\d{4}|\w+ \d{1,2}, \d{4}|Staff Economic Outlook|FEDERAL RESERVE press release|Voting for|CHAIR POWELL)', lines[0].strip()):
-        return lines[0].strip()[:100]  # Use first line if it looks like a header or date
-    paragraphs = split_paragraphs(chunk)
-    if paragraphs and len(paragraphs[0].split()) < 15:  # Short first paragraph likely title
+    cleaned = fix_text_formatting(chunk)
+    # Look for date patterns like "January 31-February 1, 2023" or "YYYY-MM-DD"
+    date_match = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(-\d{1,2})?,\s+\d{4}', cleaned)
+    if date_match:
+        return f"{date_match.group(0)} Excerpt"
+    
+    lines = cleaned.split('\n')
+    if lines and re.match(r'^(#|\d{4}|\w+ \d{1,2}, \d{4}|Staff Economic Outlook|FEDERAL RESERVE press release|Voting for|CHAIR POWELL|Minutes of the Federal Open Market Committee|Summary of Economic Projections|Participants\' Views)', lines[0].strip()):
+        return lines[0].strip()[:100]
+    
+    paragraphs = split_paragraphs(cleaned)
+    if paragraphs and len(paragraphs[0].split()) < 15:
         return paragraphs[0].strip()
-    # Fallback: Extract first sentence or key phrase
-    first_sentence = re.split(r'(?<=[\.\!\?])\s', chunk.strip())[0]
-    return first_sentence[:100] + '...' if len(first_sentence) > 100 else first_sentence
+    
+    # Fallback: First sentence, cleaned
+    first_sentence = re.split(r'(?<=[\.\!\?])\s', cleaned.strip())[0][:100]
+    return first_sentence + '...' if len(first_sentence) > 100 else first_sentence
 
 # --------------------------------------------------
 # ✨ RAG Class
@@ -106,7 +115,14 @@ class RAG:
     def retrieve_context(self, query: str) -> List[str]:
         chunks = self.retriever.retrieve(query)
         chunks = dedupe_context_texts(chunks)
-        return chunks[:5]  # Limit to top 5 most useful (assuming retrieval is ranked)
+        # Optional: Simple reranking via Cortex if needed (commented for performance; enable if latency allows)
+        # if chunks:
+        #     joined = "\n\n".join([f"Chunk {i}: {c}" for i, c in enumerate(chunks)])
+        #     rerank_prompt = f"Rank these chunks 1-5 by relevance to query '{query}': {joined}. Return only the top 5 chunk numbers separated by commas."
+        #     rerank = complete("claude-3-5-sonnet", rerank_prompt, session=session)
+        #     top_indices = [int(x.strip()) for x in str(rerank).split(',')[:5]]
+        #     chunks = [chunks[i] for i in top_indices if i < len(chunks)]
+        return chunks[:5]  # Limit to top 5
 
     def summarize_context(self, contexts: List[str]) -> str:
         if not contexts:
@@ -116,7 +132,8 @@ class RAG:
             "You are an expert financial analyst familiar with FOMC policy statements, "
             "minutes, and economic outlooks. Summarize the following excerpts clearly and concisely, "
             "retaining key figures, policy stances, economic indicators, dates, and sources of expectations "
-            "(e.g., staff projections, Chair statements). Organize by timeline or meeting date where possible:\n\n"
+            "(e.g., staff projections vs. participant views, Chair statements). Include any dissenting views or risks. "
+            "Organize by timeline, meeting date, or projection year where possible:\n\n"
             f"{joined}"
         )
         summary = complete("claude-3-5-sonnet", prompt, session=session)
@@ -129,8 +146,9 @@ class RAG:
             "Use the following summarized context from official FOMC documents to answer the user's question clearly and conversationally. "
             "In your response, specify what was expected or decided, when (e.g., specific meeting dates or projection years), "
             "by whom (e.g., FOMC staff, Chair Powell, the Committee), and why (e.g., based on economic indicators like job gains, inflation data). "
-            "Explain policy statements and market implications in simple, accurate terms. "
-            "If the answer cannot be found in the provided materials, politely say you don't have that information.\n\n"
+            "Explain policy statements and market implications in simple, accurate terms. Structure responses with bullet points or numbered lists for clarity. "
+            "If comparing figures across time or sources, present in a markdown table. Always cite specific dates/meetings and explain 'why' with evidence from indicators. "
+            "Keep responses concise—aim for 300-500 words max. If the answer cannot be found in the provided materials, politely say you don't have that information.\n\n"
             f"Context Summary:\n{summary}"
         )
         updated = list(messages)
@@ -174,6 +192,7 @@ def answer_question_using_rag(query: str):
         if not chunks:
             st.info("No relevant context retrieved.")
         else:
+            st.info("Showing top 5 relevant excerpts from FOMC documents (ranked by similarity).")
             seen_titles = set()
             for chunk in chunks:
                 cleaned = fix_text_formatting(chunk)
@@ -183,6 +202,10 @@ def answer_question_using_rag(query: str):
                 if title.lower() in seen_titles:
                     continue
                 seen_titles.add(title.lower())
+                # Optional: Highlight query terms (simple regex for demo)
+                for word in query.split():
+                    if len(word) > 3:
+                        body = re.sub(f"({re.escape(word)})", r"<mark>\1</mark>", body, flags=re.IGNORECASE)
                 st.markdown(
                     f"""
                     <div class="context-card">
