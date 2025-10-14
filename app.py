@@ -60,47 +60,25 @@ def create_snowflake_session():
         "user": st.secrets["user"],
         "password": st.secrets["password"],
         "warehouse": st.secrets["warehouse"],
-        "database": st.secrets["database"],
-        "schema": st.secrets["schema"],
+        "database": st.secrets["database"],  # Make sure this is set
+        "schema": st.secrets["schema"],      # Make sure this is set
         "role": st.secrets["role"],
     }
     return Session.builder.configs(connection_parameters).create()
 
 try:
     session = create_snowflake_session()
-    st.sidebar.success("✅ Connected to Snowflake")
+    # Test the connection with a simple query
+    test_df = session.sql("SELECT CURRENT_DATABASE(), CURRENT_SCHEMA()").collect()
+    st.sidebar.success(f"✅ Connected to Snowflake")
+    st.sidebar.write(f"Database: {test_df[0][0]}")
+    st.sidebar.write(f"Schema: {test_df[0][1]}")
 except Exception as e:
     st.error(f"❌ Failed to connect to Snowflake: {e}")
     st.stop()
 
 # --------------------------------------------------
-# 🔍 Check Available Search Services
-# --------------------------------------------------
-def list_search_services():
-    """List all available Cortex Search Services"""
-    try:
-        root = Root(session)
-        database = root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-        schema = database.schemas["PUBLIC"]
-        services = list(schema.cortex_search_services)
-        return services
-    except Exception as e:
-        st.error(f"Error listing search services: {e}")
-        return []
-
-# Display available search services in sidebar
-with st.sidebar:
-    st.subheader("Search Services")
-    services = list_search_services()
-    if services:
-        st.write("Available services:")
-        for service in services:
-            st.write(f"- {service.name}")
-    else:
-        st.warning("No search services found")
-
-# --------------------------------------------------
-# 🧠 Retriever Class
+# 🧠 Retriever Class - FIXED VERSION
 # --------------------------------------------------
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit_to_retrieve: int = 10):
@@ -109,25 +87,60 @@ class CortexSearchRetriever:
 
     def retrieve(self, query: str) -> List[dict]:
         try:
+            # First, let's verify the search service exists
             root = Root(self._snowpark_session)
+            
+            # Use fully qualified names to avoid context issues
             search_service = (
                 root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
                 .schemas["PUBLIC"]
                 .cortex_search_services["FOMC_SEARCH_SERVICE"]
             )
-            resp = search_service.search(query=query, columns=["chunk", "file_name"], limit=self._limit_to_retrieve)
+            
+            # Perform the search
+            resp = search_service.search(
+                query=query, 
+                columns=["chunk", "file_name"], 
+                limit=self._limit_to_retrieve
+            )
+            
             if resp.results:
                 return [{"chunk": r["chunk"], "file_name": r["file_name"]} for r in resp.results]
             return []
+            
         except Exception as e:
             st.error(f"❌ Error retrieving data: {e}")
-            st.info("""
-            **Troubleshooting steps:**
-            1. Check if the Cortex Search Service exists
-            2. Verify your role has access to the service
-            3. Ensure the service is in the CORTEX_SEARCH_TUTORIAL_DB.PUBLIC schema
-            """)
-            return []
+            
+            # Fallback: Try SQL-based approach
+            st.info("🔄 Trying SQL fallback approach...")
+            try:
+                return self._sql_fallback(query)
+            except Exception as fallback_error:
+                st.error(f"❌ SQL fallback also failed: {fallback_error}")
+                return []
+
+    def _sql_fallback(self, query: str) -> List[dict]:
+        """Fallback using direct SQL queries"""
+        sql = f"""
+        WITH search_results AS (
+            SELECT 
+                chunk,
+                file_name,
+                VECTOR_COSINE_SIMILARITY(
+                    snowflake.arctic.embed_text('snowflake-arctic-embed-l-v2.0', chunk),
+                    snowflake.arctic.embed_text('snowflake-arctic-embed-l-v2.0', '{query.replace("'", "''")}')
+                ) as similarity
+            FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_CONTENT
+            ORDER BY similarity DESC
+            LIMIT {self._limit_to_retrieve}
+        )
+        SELECT chunk, file_name
+        FROM search_results
+        WHERE similarity > 0.1  -- Basic relevance threshold
+        """
+        
+        df = self._snowpark_session.sql(sql).collect()
+        return [{"chunk": row["CHUNK"], "file_name": row["FILE_NAME"]} for row in df]
 
 # --------------------------------------------------
 # 🧹 Utility Functions
