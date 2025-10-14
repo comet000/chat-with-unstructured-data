@@ -2,6 +2,8 @@ import streamlit as st
 import re
 from typing import List
 from snowflake.snowpark import Session
+from snowflake.core import Root
+from snowflake.cortex import complete
 
 # ------------------------------------------------------------
 # 🔧 SNOWFLAKE CONNECTION
@@ -43,6 +45,8 @@ mark {
 </style>
 """, unsafe_allow_html=True)
 
+st.title("💬 FOMC Document Chat (Snowflake Cortex RAG)")
+
 # ------------------------------------------------------------
 # 🧠 UTILITIES
 # ------------------------------------------------------------
@@ -63,9 +67,6 @@ def dedupe_context_texts(texts: List[str]) -> List[str]:
     return result
 
 def extract_better_title(text: str) -> str:
-    match = re.match(r"^[A-Z][A-Z\s\-]{5,100}$", text.strip().split("\n")[0])
-    if match:
-        return match.group(0).title()
     first_line = text.strip().split("\n")[0]
     return first_line[:90] + ("..." if len(first_line) > 90 else "")
 
@@ -84,14 +85,17 @@ class CortexSearchRetriever:
         self._limit_to_retrieve = limit_to_retrieve
 
     def retrieve(self, query: str):
+        # ✅ use Root API — not session.database()
+        root = Root(self.session)
         search_service = (
-            self.session
-            .database("CORTEX_SEARCH_TUTORIAL_DB")
-            .schema("PUBLIC")
-            .cortex_search_services["FOMC_SEARCH_SERVICE"]
+            root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
+                .schemas["PUBLIC"]
+                .cortex_search_services["FOMC_SEARCH_SERVICE"]
         )
-        # ✅ only use columns that exist
+
+        # ✅ only query existing columns
         resp = search_service.search(query=query, columns=["chunk", "file_name"], limit=self._limit_to_retrieve)
+
         if resp.results:
             return [{"chunk": r["chunk"], "file_name": r.get("file_name", "Unknown_File")} for r in resp.results]
         return []
@@ -139,7 +143,7 @@ def answer_question_using_rag(query: str):
         cleaned = fix_text_formatting(chunk)
         paragraphs = split_paragraphs(cleaned)
         title = extract_better_title(cleaned)
-        body = " ".join(paragraphs[1:]) if len(paragraphs) > 1 and len(paragraphs[0].split()) < 15 else " ".join(paragraphs)
+        body = " ".join(paragraphs)
 
         # 🔹 Highlight query words
         query_words = {w.lower() for w in query.split() if len(w) > 4 and w.lower() not in STOPWORDS}
@@ -157,8 +161,7 @@ def answer_question_using_rag(query: str):
         </div>
         """, unsafe_allow_html=True)
 
-    # 🧠 Generate answer using Cortex complete (optional)
-    from snowflake.cortex import complete
+    # 🧠 Generate answer using Snowflake Cortex
     joined_context = "\n\n".join(chunks[:5])
     prompt = f"""You are an assistant summarizing FOMC policy context.
 Use the excerpts below to answer accurately.
@@ -169,16 +172,13 @@ Context:
 Question: {query}
 
 Answer:"""
-    answer = complete("snowflake-arctic-instruct", prompt)
-    return answer
+    answer = complete("snowflake-arctic-instruct", prompt, session=session)
+    return str(answer).strip()
 
 # ------------------------------------------------------------
 # 🚀 STREAMLIT UI
 # ------------------------------------------------------------
 def main():
-    st.title("💬 FOMC Document Chat (Snowflake Cortex RAG)")
-    st.caption("Ask questions about FOMC statements and related policy documents.")
-
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
