@@ -8,28 +8,18 @@ from typing import List
 from datetime import datetime
 from snowflake.snowpark import Session
 from snowflake.core import Root
-from snowflake.cortex import complete
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 
-# Version checks for snowflake dependencies
+# Version check for snowflake-core
 try:
     import snowflake.core
     logging.info(f"snowflake-core version: {snowflake.core.__version__}")
 except ImportError:
     logging.error("snowflake-core not installed. Please add to requirements.txt.")
     st.error("Missing snowflake-core package. Please update requirements.txt and redeploy.")
-    st.stop()
-
-try:
-    import snowflake.cortex
-    import snowflake.connector
-    logging.info(f"snowflake-connector-python version: {snowflake.connector.__version__}")
-except ImportError:
-    logging.error("snowflake-connector-python or snowflake.cortex not installed. Please add snowflake-connector-python to requirements.txt.")
-    st.error("Missing snowflake-connector-python package. Please update requirements.txt and redeploy.")
     st.stop()
 
 # ======================================================
@@ -380,12 +370,25 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
 
 def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
     """
-    Streaming call with retries and fallback to faster model.
+    Streaming call with retries and fallback to faster model using SQL-based Cortex completion.
     """
     prompt = build_system_prompt(query, contexts, conversation_history)
 
     def run_completion(model_to_use):
-        return complete(model_to_use, prompt, stream=True, session=session)
+        try:
+            # Use SQL to call Cortex COMPLETE function
+            result = session.sql(
+                f"""
+                SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                    '{model_to_use}',
+                    '{prompt.replace("'", "''")}'
+                ) AS response
+                """
+            ).collect()
+            return iter([result[0]["response"]])
+        except Exception as e:
+            logging.error(f"SQL Cortex completion failed: {e}")
+            raise
 
     max_retries = 2
     for attempt in range(max_retries + 1):
@@ -399,7 +402,14 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             try:
                 # Fallback to faster model with fewer contexts
                 prompt = build_system_prompt(query, contexts[:3], "")
-                return iter([complete("mixtral-8x7b", prompt, session=session)])
+                return iter([session.sql(
+                    f"""
+                    SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                        'mixtral-8x7b',
+                        '{prompt.replace("'", "''")}'
+                    ) AS response
+                    """
+                ).collect()[0]["response"]])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
                 return iter(["Limited information in the provided documents. Here is a partial answer based on available data..."])
@@ -411,7 +421,14 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     try:
         logging.warning("Falling back to non-streaming completion.")
         prompt = build_system_prompt(query, contexts[:3], "")
-        backup = complete("mixtral-8x7b", prompt, session=session)
+        backup = session.sql(
+            f"""
+            SELECT SNOWFLAKE.CORTEX.COMPLETE(
+                'mixtral-8x7b',
+                '{prompt.replace("'", "''")}'
+            ) AS response
+            """
+        ).collect()[0]["response"]
         return iter([backup])
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
@@ -584,7 +601,7 @@ def run_query(user_query: str):
 if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
-    run_query(user_input)
+    run_query(user_query)
 
 # Export chat history as PDF
 st.markdown("### Download Conversation")
