@@ -6,10 +6,10 @@ import logging
 # --- Initialize session state variables safely ---
 # Initialize session state keys
 if "messages" not in st.session_state:
-st.session_state.messages = []
+    st.session_state.messages = []
 
 if "rag_cache" not in st.session_state:
-st.session_state.rag_cache = {}
+    st.session_state.rag_cache = {}
 
 st.set_page_config(page_title="Chat with the Federal Reserve", page_icon="💬", layout="centered")
 st.title("🏦 Chat with the Federal Reserve")
