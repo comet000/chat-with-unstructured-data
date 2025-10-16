@@ -1,4 +1,5 @@
 streamlit
 snowflake-snowpark-python
+snowflake-core-python
 cachetools
 reportlab
