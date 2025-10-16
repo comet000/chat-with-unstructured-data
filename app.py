@@ -9,10 +9,6 @@ from datetime import datetime
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from snowflake.cortex import complete
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
-from reportlab.lib.styles import getSampleStyleSheet
-from io import BytesIO
 
 # ======================================================
 # 🔧 INITIAL SETUP
@@ -43,11 +39,9 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "rag_cache" not in st.session_state:
     from cachetools import LRUCache
-    st.session_state.rag_cache = LRUCache(maxsize=50)
+    st.session_state.rag_cache = LRUCache(maxsize=20)
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
-if "follow_up_suggestions" not in st.session_state:
-    st.session_state.follow_up_suggestions = ["Why did this happen?", "What are the projections for next year?"]
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -203,7 +197,7 @@ def create_direct_link(file_name: str) -> str:
 # ======================================================
 
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit: int = 15):  # Increased for multi-year queries
+    def __init__(self, snowpark_session: Session, limit: int = 12):
         self._root = Root(snowpark_session)
         self._service = search_service
         self.limit = limit
@@ -223,8 +217,8 @@ class CortexSearchRetriever:
 
             target_years = extract_target_years(query)
             if target_years:
-                lower_year = min(target_years) - 3  # Broader range for multi-year queries
-                upper_year = max(target_years) + 1
+                lower_year = min(target_years) - 1
+                upper_year = max(target_years)
                 filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
                 if filtered_docs:
                     docs = filtered_docs
@@ -255,7 +249,7 @@ Glossary:
 
 def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
     """
-    Build an optimized system prompt with enhanced trend synthesis for multi-year queries.
+    Build an optimized system prompt with limited context size and inference encouragement.
     """
     # Group contexts by year (limit to top 5 to reduce size)
     year_buckets = {}
@@ -286,9 +280,9 @@ Today is {datetime.now():%B %d, %Y}.
 
 {glossary}
 
-Use the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
-For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., "Based on 2025 data and assuming 2023-2024 trends continue..."). Provide a partial answer if direct data is limited, clearly stating assumptions.
-If insufficient, respond: "Limited information in the provided documents. Here is a partial answer based on available data..."
+Use ONLY the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
+If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating any assumptions (e.g., "Assuming trends from 2024 continue...").
+If insufficient, respond: "Insufficient information in the provided documents. Please check the Federal Reserve website for more details."
 
 Context excerpts by year:
 
@@ -368,7 +362,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
-                return iter(["Limited information in the provided documents. Here is a partial answer based on available data..."])
+                return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
@@ -387,19 +381,10 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
 # 💬 STREAMLIT UI LOGIC
 # ======================================================
 
-# Sidebar for follow-up suggestions
-with st.sidebar:
-    st.header("Suggested Follow-Ups")
-    for suggestion in st.session_state.follow_up_suggestions:
-        if st.button(suggestion, key=f"suggestion_{suggestion}"):
-            st.session_state.messages.append({"role": "user", "content": suggestion})
-            run_query(suggestion)
-
 if st.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
     st.session_state.rag_cache.clear()
     st.session_state.last_contexts.clear()
-    st.session_state.follow_up_suggestions = ["Why did this happen?", "What are the projections for next year?"]
     st.rerun()
 
 # Display chat history
@@ -407,62 +392,9 @@ for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
-# Predefined questions
-predefined_questions = [
-    "What was the federal funds rate target range in January 2023?",
-    "Why did the Federal Reserve pause rate hikes in 2023?",
-    "What were the key risks discussed in the January 2025 FOMC minutes?",
-    "How did the Beige Book describe economic conditions in July 2024?",
-    "What were the FOMC’s inflation projections in December 2025?",
-    "What factors influenced the Fed’s rate cut decisions in September 2025?",
-    "How did nonbank vulnerabilities affect monetary policy in November 2024?",
-    "What labor market indicators were mentioned in the 2025 FOMC minutes?",
-    "What were the key points from the June 2023 FOMC press conference?",
-    "What regional economic trends were noted in the April 2023 Beige Book?",
-]
-
-def get_dynamic_follow_ups(query: str) -> List[str]:
-    """
-    Generate dynamic follow-up suggestions based on query content.
-    """
-    query_lower = query.lower()
-    if "rate" in query_lower or "fed funds" in query_lower:
-        return ["Why were rates adjusted?", "What are the projected rates for next year?"]
-    elif "inflation" in query_lower or "cpi" in query_lower:
-        return ["What factors drove inflation?", "How does inflation compare to the Fed’s target?"]
-    elif "beige book" in query_lower:
-        return ["What were the regional differences?", "How did specific sectors perform?"]
-    elif "labor" in query_lower or "employment" in query_lower:
-        return ["What are the unemployment trends?", "How do wages impact policy?"]
-    else:
-        return ["Why did this happen?", "What are the projections for next year?"]
-
-def create_pdf(history_md: str) -> BytesIO:
-    """
-    Generate a PDF from Markdown content using reportlab.
-    """
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter)
-    styles = getSampleStyleSheet()
-    story = []
-    for line in history_md.split("\n"):
-        if line.startswith("#"):
-            story.append(Paragraph(line.lstrip("# "), styles["Title"]))
-        elif line.startswith("**"):
-            role, content = line.split("**: ", 1)
-            story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
-        elif line.startswith("- **"):
-            story.append(Paragraph(line, styles["Normal"]))
-        else:
-            story.append(Paragraph(line, styles["Normal"]))
-        story.append(Spacer(1, 12))
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
-
 def run_query(user_query: str):
     """
-    Main query execution with logging and dynamic follow-ups.
+    Main query execution with logging for production monitoring.
     """
     start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
@@ -496,9 +428,6 @@ def run_query(user_query: str):
     generation_time = time.time() - start_time - retrieval_time
     st.session_state.messages.append({"role": "assistant", "content": response_text})
 
-    # Update dynamic follow-up suggestions
-    st.session_state.follow_up_suggestions = get_dynamic_follow_ups(user_query)
-
     # Limit message history
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
@@ -517,6 +446,9 @@ def run_query(user_query: str):
                 st.caption(snippet)
                 st.divider()
 
+    # Suggested follow-ups
+    st.write("Suggested follow-ups: Why did this happen? What are the projections for next year?")
+    
     # Log to Snowflake
     try:
         context_size = sum(len(c["chunk"]) for c in contexts)
@@ -531,25 +463,19 @@ def run_query(user_query: str):
     except Exception as e:
         logging.error(f"Logging failed: {e}")
 
-# Input UI: Dropdown + Chat Input
-st.markdown("### Ask a Question")
-selected_question = st.selectbox("Choose a question or ask your own", [""] + predefined_questions)
-user_input = st.chat_input("Ask your own question...")
+# Chat input
+user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
+if user_input:
+    st.chat_message("user", avatar="👤").write(user_input)
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    run_query(user_input)
 
-if selected_question or user_input:
-    query = selected_question if selected_question else user_input
-    if query:
-        st.chat_message("user", avatar="👤").write(query)
-        st.session_state.messages.append({"role": "user", "content": query})
-        run_query(query)
-
-# Export chat history with format selection
-st.markdown("### Export Chat History")
-export_format = st.selectbox("Select export format", ["Markdown (.md)", "PDF (.pdf)"])
+# Export chat history with timestamp and sources
 if st.button("📥 Export Chat History"):
     history_md = f"# Chat History - {datetime.now():%B %d, %Y %H:%M}\n\n"
     for msg in st.session_state.messages:
         history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
+    # Append sources from last query
     if st.session_state.last_contexts:
         history_md += "## Sources Used in Last Response\n\n"
         for c in st.session_state.last_contexts:
@@ -559,9 +485,4 @@ if st.button("📥 Export Chat History"):
             history_md += f"- **{title}** ([Link]({pdf_url}))\n  {snippet}\n\n"
     else:
         history_md += "## Sources\n\nNo documents found for the last query.\n"
-    
-    if export_format == "PDF (.pdf)":
-        pdf_buffer = create_pdf(history_md)
-        st.download_button("Download Chat History as PDF", pdf_buffer, "chat_history.pdf", "application/pdf")
-    else:
-        st.download_button("Download Chat History as Markdown", history_md, "chat_history.md")
+    st.download_button("Download Chat History", history_md, "chat_history.md")
