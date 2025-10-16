@@ -1,9 +1,8 @@
-streamlit==1.50.0
-snowflake-snowpark-python==1.40.0
-snowflake-core==0.10.0
-snowflake-ml-python==1.6.0
-trulens-core==1.2.0
-trulens-providers-cortex==1.2.0
-trulens-connectors-snowflake==1.2.0
-cachetools==6.2.1
-reportlab==4.4.4
+streamlit
+snowflake-snowpark-python
+snowflake-ml-python
+trulens-core
+trulens-providers-cortex
+trulens-connectors-snowflake
+cachetools
+reportlab
