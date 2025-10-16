@@ -3,24 +3,15 @@ import re
 import logging
 import concurrent.futures
 import time
-import os
 from typing import List
 from datetime import datetime
 from snowflake.snowpark import Session
 from snowflake.core import Root
+from snowflake.cortex import complete
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
-
-# Version check for snowflake-core
-try:
-    import snowflake.core
-    logging.info(f"snowflake-core version: {snowflake.core.__version__}")
-except ImportError:
-    logging.error("snowflake-core not installed. Please add to requirements.txt.")
-    st.error("Missing snowflake-core package. Please update requirements.txt and redeploy.")
-    st.stop()
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -35,7 +26,7 @@ st.set_page_config(
 st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
 st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
 
-# Hide Streamlit default menu and footer for cleaner UI
+# Hide Streamlit default menu and footer
 st.markdown(
     """
     <style>
@@ -45,19 +36,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
-# Initialize session state keys
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-if "rag_cache" not in st.session_state:
-    from cachetools import LRUCache
-    st.session_state.rag_cache = LRUCache(maxsize=50)
-if "last_contexts" not in st.session_state:
-    st.session_state.last_contexts = []
-if "follow_up_suggestions" not in st.session_state:
-    st.session_state.follow_up_suggestions = []
-if "has_queried" not in st.session_state:
-    st.session_state.has_queried = False
 
 # Auto-scroll JavaScript
 st.markdown(
@@ -73,15 +51,24 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# CACHE & MESSAGE MANAGEMENT HELPERS
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "rag_cache" not in st.session_state:
+    from cachetools import LRUCache
+    st.session_state.rag_cache = LRUCache(maxsize=50)
+if "last_contexts" not in st.session_state:
+    st.session_state.last_contexts = []
+if "follow_up_suggestions" not in st.session_state:
+    st.session_state.follow_up_suggestions = []
+if "has_queried" not in st.session_state:
+    st.session_state.has_queried = False
+
+# CACHE & MESSAGE MANAGEMENT
 def cache_with_limit(cache_dict, key, value):
     cache_dict[key] = value
 
 def get_recent_conversation_context(messages, max_pairs=2):
-    """
-    Get only the last N user/assistant pairs for conversation context.
-    Prioritize follow-up questions.
-    """
     history = []
     for msg in messages[-(max_pairs * 2):]:
         role = "User" if msg["role"] == "user" else "Assistant"
@@ -104,25 +91,23 @@ def create_snowflake_session():
             "role": st.secrets["role"],
         }
     except (KeyError, TypeError) as e:
-        logging.error(f"Failed to load secrets from Streamlit: {e}")
+        logging.error(f"Failed to load secrets: {e}")
         connection_parameters = {
-            "account": os.getenv("SNOWFLAKE_ACCOUNT", "fokiamm-yqb60913"),
-            "user": os.getenv("SNOWFLAKE_USER", "streamlit_demo_user"),
-            "password": os.getenv("SNOWFLAKE_PASSWORD", "RagCortex#78_Pw"),
-            "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "CORTEX_SEARCH_TUTORIAL_WH"),
-            "database": os.getenv("SNOWFLAKE_DATABASE", "CORTEX_SEARCH_TUTORIAL_DB"),
-            "schema": os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC"),
-            "role": os.getenv("SNOWFLAKE_ROLE", "STREAMLIT_READONLY_ROLE"),
+            "account": "fokiamm-yqb60913",
+            "user": "streamlit_demo_user",
+            "password": "RagCortex#78_Pw",
+            "warehouse": "CORTEX_SEARCH_TUTORIAL_WH",
+            "database": "CORTEX_SEARCH_TUTORIAL_DB",
+            "schema": "PUBLIC",
+            "role": "STREAMLIT_READONLY_ROLE",
         }
-        st.error("Failed to load Snowflake credentials from secrets. Using fallback environment variables. Please check Streamlit Cloud secrets configuration.")
-    
     try:
         session = Session.builder.configs(connection_parameters).create()
         logging.info("Snowflake session created successfully")
         return session
     except Exception as e:
         logging.error(f"Failed to create Snowflake session: {e}")
-        st.error(f"Cannot connect to Snowflake: {e}. Please check credentials and try again.")
+        st.error(f"Cannot connect to Snowflake: {e}")
         raise
 
 try:
@@ -134,7 +119,7 @@ try:
         .cortex_search_services["FOMC_SEARCH_SERVICE"]
     )
 except Exception as e:
-    st.error("Failed to initialize Snowflake connection. Please check logs and secrets configuration.")
+    st.error("Failed to initialize Snowflake connection.")
     st.stop()
 
 # TEXT & FILE HELPERS
@@ -240,7 +225,6 @@ class CortexSearchRetriever:
             docs = docs[:self.limit]
 
             return [{"chunk": d["chunk"], "file_name": d["file_name"]} for d in docs]
-
         except Exception as e:
             logging.error(f"Cortex Search retrieval error: {e}")
             st.error(f"❌ Cortex Search Error: {e}")
@@ -258,9 +242,6 @@ Glossary:
 """
 
 def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
-    """
-    Build a system prompt optimized for precise queries with synthesis for multi-year questions.
-    """
     year_buckets = {}
     for c in contexts[:5]:
         year = extract_file_year(c["file_name"])
@@ -303,9 +284,6 @@ Answer:"""
 
 # LLM COMPLETION
 def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -> List[dict]:
-    """
-    Wrap rag_retriever.retrieve with timeout, retry, and caching.
-    """
     if not query:
         return []
 
@@ -340,24 +318,13 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
     return fallback
 
 def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
-    """
-    Streaming call with retries and fallback to faster model using SQL-based Cortex completion.
-    """
     prompt = build_system_prompt(query, contexts, conversation_history)
 
     def run_completion(model_to_use):
         try:
-            result = session.sql(
-                f"""
-                SELECT SNOWFLAKE.CORTEX.COMPLETE(
-                    '{model_to_use}',
-                    '{prompt.replace("'", "''")}'
-                ) AS response
-                """
-            ).collect()
-            return iter([result[0]["response"]])
+            return complete(model_to_use, prompt, stream=True, session=session)
         except Exception as e:
-            logging.error(f"SQL Cortex completion failed: {e}")
+            logging.error(f"Cortex completion failed: {e}")
             raise
 
     max_retries = 2
@@ -371,14 +338,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             st.warning("Response took too long. Trying faster model...")
             try:
                 prompt = build_system_prompt(query, contexts[:3], "")
-                return iter([session.sql(
-                    f"""
-                    SELECT SNOWFLAKE.CORTEX.COMPLETE(
-                        'mixtral-8x7b',
-                        '{prompt.replace("'", "''")}'
-                    ) AS response
-                    """
-                ).collect()[0]["response"]])
+                return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
                 return iter(["Limited information in the provided documents. Here is a partial answer based on available data..."])
@@ -389,23 +349,13 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     try:
         logging.warning("Falling back to non-streaming completion.")
         prompt = build_system_prompt(query, contexts[:3], "")
-        backup = session.sql(
-            f"""
-            SELECT SNOWFLAKE.CORTEX.COMPLETE(
-                'mixtral-8x7b',
-                '{prompt.replace("'", "''")}'
-            ) AS response
-            """
-        ).collect()[0]["response"]
+        backup = complete("mixtral-8x7b", prompt, session=session)
         return iter([backup])
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
         return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
 def get_dynamic_follow_ups(query: str) -> List[str]:
-    """
-    Generate dynamic follow-up suggestions based on query content.
-    """
     query_lower = query.lower()
     if "rate" in query_lower or "fed funds" in query_lower:
         return ["Why were rates adjusted?", "What are the projected rates for next year?"]
@@ -421,9 +371,6 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
         return ["Why did this happen?", "What are the projections for next year?"]
 
 def create_pdf(history_md: str) -> BytesIO:
-    """
-    Generate a PDF from Markdown content using reportlab.
-    """
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -444,16 +391,12 @@ def create_pdf(history_md: str) -> BytesIO:
     return buffer
 
 def run_query(user_query: str):
-    """
-    Main query execution with logging and dynamic follow-ups.
-    """
     start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
     
     with st.spinner("Searching documents..."):
         contexts = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
-    retrieval_time = time.time() - start_time
-
+    
     if not contexts:
         st.info("No relevant context found. Answering from general knowledge.")
 
@@ -473,7 +416,6 @@ def run_query(user_query: str):
         except Exception:
             logging.exception("Error while streaming chunk")
 
-    generation_time = time.time() - start_time - retrieval_time
     st.session_state.messages.append({"role": "assistant", "content": response_text})
     st.session_state.has_queried = True
 
@@ -494,19 +436,6 @@ def run_query(user_query: str):
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
-
-    try:
-        context_size = sum(len(c["chunk"]) for c in contexts)
-        session.sql(f"""
-            INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
-                query, response, num_contexts, context_size, retrieval_time, generation_time, timestamp
-            ) VALUES (
-                '{user_query.replace("'", "''")}', '{response_text.replace("'", "''")}',
-                {len(contexts)}, {context_size}, {retrieval_time}, {generation_time}, CURRENT_TIMESTAMP()
-            )
-        """).collect()
-    except Exception as e:
-        logging.error(f"Logging failed: {e}")
 
 # STREAMLIT UI LOGIC
 with st.sidebar:
