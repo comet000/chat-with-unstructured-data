@@ -37,35 +37,28 @@ st.markdown(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "rag_cache" not in st.session_state:
-    st.session_state.rag_cache = {}
+    from cachetools import LRUCache
+    st.session_state.rag_cache = LRUCache(maxsize=20)
 
 # ======================================================
 # 🔧 CACHE & MESSAGE MANAGEMENT HELPERS
 # ======================================================
 
-def cache_with_limit(cache_dict, key, value, max_size=20):
-    """Add to cache with size limit (FIFO eviction)"""
-    if len(cache_dict) >= max_size and key not in cache_dict:
-        # Remove oldest entry
-        first_key = next(iter(cache_dict))
-        cache_dict.pop(first_key)
+def cache_with_limit(cache_dict, key, value):
     cache_dict[key] = value
 
-def get_recent_conversation_context(messages, max_pairs=3):
+def get_recent_conversation_context(messages, max_pairs=2):
     """
     Get only the last N user/assistant pairs for conversation context.
-    This prevents the prompt from growing too large.
+    Prioritize follow-up questions.
     """
-    user_assistant = [m for m in messages if m["role"] in ["user", "assistant"]]
-    recent = user_assistant[-(max_pairs * 2):]
-    
-    # Format as conversation history string
     history = []
-    for msg in recent:
+    for msg in messages[-(max_pairs * 2):]:
         role = "User" if msg["role"] == "user" else "Assistant"
-        history.append(f"{role}: {msg['content']}")
-    
-    return "\n".join(history) if history else ""
+        weight = 1.5 if msg["content"].lower().startswith(("why", "how", "what")) else 1.0
+        history.append((f"{role}: {msg['content']}", weight))
+    history.sort(key=lambda x: x[1], reverse=True)
+    return "\n".join(h[0] for h in history) if history else ""
 
 # ======================================================
 # ❄️ SNOWFLAKE CONNECTION
@@ -74,16 +67,15 @@ def get_recent_conversation_context(messages, max_pairs=3):
 @st.cache_resource
 def create_snowflake_session():
     connection_parameters = {
-        "account": "fokiamm-yqb60913",
-        "user": "streamlit_demo_user",
-        "password": "RagCortex#78_Pw",
+        "account": st.secrets["snowflake"]["account"],
+        "user": st.secrets["snowflake"]["user"],
+        "password": st.secrets["snowflake"]["password"],
         "warehouse": "CORTEX_SEARCH_TUTORIAL_WH",
         "database": "CORTEX_SEARCH_TUTORIAL_DB",
         "schema": "PUBLIC",
         "role": "STREAMLIT_READONLY_ROLE",
     }
     return Session.builder.configs(connection_parameters).create()
-
 
 session = create_snowflake_session()
 root = Root(session)
@@ -100,18 +92,15 @@ search_service = (
 def extract_target_years(query: str) -> List[int]:
     return [int(y) for y in re.findall(r"20\d{2}", query)]
 
-
 def extract_file_year(file_name: str) -> int:
     match = re.search(r"(\d{4})", file_name)
     return int(match.group(1)) if match else 0
-
 
 def clean_chunk(chunk: str) -> str:
     cleaned = re.sub(r"!\[.*?\]\(.*?\)", "", chunk)
     cleaned = re.sub(r"#{1,6}\s*", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
-
 
 def extract_clean_title(file_name: str) -> str:
     match = re.search(r"(\d{4})(\d{2})(\d{2})", file_name)
@@ -120,13 +109,11 @@ def extract_clean_title(file_name: str) -> str:
         "05": "May", "06": "June", "07": "July", "08": "August",
         "09": "September", "10": "October", "11": "November", "12": "December",
     }
-
     if match:
         year, month, day = match.groups()
         date_str = f"{month_map.get(month, month)} {int(day)}, {year}"
     else:
         date_str = "Unknown Date"
-
     fname = file_name.lower()
     if "beigebook" in fname or "beigebook_" in fname:
         doc_type = "Beige Book"
@@ -146,19 +133,12 @@ def extract_clean_title(file_name: str) -> str:
         doc_type = "FOMC Minutes"
     else:
         doc_type = "FOMC Document"
-
     return f"{doc_type} - {date_str}"
 
-
 def create_direct_link(file_name: str) -> str:
-    """
-    Build the correct public URL for any Federal Reserve PDF
-    based on its filename pattern.
-    """
     try:
         base = "https://www.federalreserve.gov"
         name = file_name.split("/")[-1]
-
         mapping = [
             (r"beigebook", f"{base}/monetarypolicy/files/"),
             (r"fomc_longerungoals", f"{base}/monetarypolicy/files/"),
@@ -172,13 +152,10 @@ def create_direct_link(file_name: str) -> str:
             (r"mprfullreport", f"{base}/monetarypolicy/files/"),
             (r"fomcminutes", f"{base}/monetarypolicy/files/"),
         ]
-
         lower = name.lower()
         for pattern, prefix in mapping:
             if pattern in lower:
                 return prefix + name
-
-        # default fallback to monetarypolicy files
         return f"{base}/monetarypolicy/files/{name}"
     except Exception as e:
         logging.error(f"create_direct_link failed for {file_name}: {e}")
@@ -189,7 +166,7 @@ def create_direct_link(file_name: str) -> str:
 # ======================================================
 
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit: int = 20):
+    def __init__(self, snowpark_session: Session, limit: int = 12):
         self._root = Root(snowpark_session)
         self._service = search_service
         self.limit = limit
@@ -259,8 +236,8 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
     context_text = "\n\n".join(grouped_texts)
     
     # Strict token limit on context
-    if len(context_text) > 2500:  # Reduced from 3500
-        context_text = context_text[:2500]
+    if len(context_text) > 1500:  # Reduced from 2500
+        context_text = context_text[:1500]
 
     # Add conversation history if available (keeps context between questions)
     history_section = ""
@@ -274,6 +251,8 @@ Today is {datetime.now():%B %d, %Y}.
 {glossary}
 
 Use ONLY the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
+If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating any assumptions.
+If insufficient, respond: "Insufficient information in the provided documents. Please check the Federal Reserve website for more details."
 
 Context excerpts by year:
 
@@ -296,9 +275,15 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
     if not query:
         return []
 
+    # Normalize query for cache
+    def normalize_query(q):
+        return re.sub(r'[^\w\s]', '', q.lower()).strip()
+    
+    norm_query = normalize_query(query)
+
     # Check cache first
-    if query in st.session_state.rag_cache:
-        return st.session_state.rag_cache[query]
+    if norm_query in st.session_state.rag_cache:
+        return st.session_state.rag_cache[norm_query]
 
     def _call():
         return rag_retriever.retrieve(query)
@@ -309,7 +294,7 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
                 future = executor.submit(_call)
                 results = future.result(timeout=timeout)
                 # Cache with size limit
-                cache_with_limit(st.session_state.rag_cache, query, results, max_size=20)
+                cache_with_limit(st.session_state.rag_cache, norm_query, results)
                 return results
         except concurrent.futures.TimeoutError:
             logging.warning(f"Retrieval timed out (attempt {attempt+1}/{retries+1})")
@@ -319,19 +304,19 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
             time.sleep(1)
 
     # Fallback to cached result if available
-    fallback = st.session_state.rag_cache.get(query, [])
+    fallback = st.session_state.rag_cache.get(norm_query, [])
     if fallback:
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
 
-def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = ""):
+def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
     """
     Streaming call with retries and fallback.
     """
     prompt = build_system_prompt(query, contexts, conversation_history)
 
     def run_completion():
-        return complete("claude-3-5-sonnet", prompt, stream=True, session=session)
+        return complete(model, prompt, stream=True, session=session)
 
     max_retries = 2
     for attempt in range(max_retries + 1):
@@ -341,7 +326,12 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
                 return future.result(timeout=60)  # Reduced from 90
         except concurrent.futures.TimeoutError:
             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
-            time.sleep(2)
+            st.warning("Response took too long. Providing partial answer...")
+            prompt = build_system_prompt(query, contexts[:5], "")  # Use fewer contexts
+            try:
+                return iter([complete("mixtral-8x7b", prompt, session=session)])
+            except:
+                return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
@@ -349,7 +339,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     # Silent fallback to non-streaming
     try:
         logging.warning("Falling back to non-streaming completion.")
-        backup = complete("claude-3-5-sonnet", prompt, session=session)
+        backup = complete("mixtral-8x7b", prompt, session=session)
         return iter([backup])
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
@@ -408,9 +398,9 @@ def run_query(user_query: str):
         st.session_state.messages = st.session_state.messages[-10:]
 
     # Show context sources
-    top_contexts = contexts[:3] if contexts else []
+    top_contexts = contexts[:5] if contexts else []
     if top_contexts:
-        with st.expander("📄 View Context (top 3)"):
+        with st.expander("📄 View Context (top 5)", expanded=False):
             for c in top_contexts:
                 title = extract_clean_title(c["file_name"])
                 pdf_url = create_direct_link(c["file_name"])
@@ -420,6 +410,24 @@ def run_query(user_query: str):
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
+    else:
+        st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
+    
+    # Suggested follow-ups
+    st.write("Suggested follow-ups: Why did this happen? What are the projections for next year?")
+    
+    # Log to Snowflake
+    try:
+        session.sql(f"""
+            INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
+                query, response, num_contexts, timestamp
+            ) VALUES (
+                '{user_query.replace("'", "''")}', '{response_text.replace("'", "''")}',
+                {len(contexts)}, CURRENT_TIMESTAMP()
+            )
+        """).collect()
+    except Exception as e:
+        logging.error(f"Logging failed: {e}")
 
 # Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
@@ -427,3 +435,10 @@ if user_input:
     st.chat_message("user").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
+
+# Export chat history
+if st.button("📥 Export Chat History"):
+    history_md = ""
+    for msg in st.session_state.messages:
+        history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
+    st.download_button("Download Chat History", history_md, "chat_history.md")
