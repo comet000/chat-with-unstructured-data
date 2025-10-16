@@ -251,7 +251,7 @@ Today is {datetime.now():%B %d, %Y}.
 
 {glossary}
 
-Use ONLY the following excerpts from FOMC minutes, press conferences, projections, and Beige Books to answer the user's question below. Do not invent facts or speculate.
+Use ONLY the following excerpts from FOMC minutes, press conferences, projections, Beige Books, press releases, and Longer-Run Goals to answer the user's question below. Do not invent facts or speculate. When relevant, cite the document type and year (e.g., “According to the January 2025 FOMC Minutes…” or “As stated in the Fed’s 2024 Longer-Run Goals statement…”).
 
 {examples}
 
