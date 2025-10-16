@@ -19,8 +19,8 @@ if "rag_cache" not in st.session_state:
 
 # --- Streamlit Config ---
 st.set_page_config(page_title="Chat with the Federal Reserve", page_icon="💬", layout="centered")
-st.title("🏦 Built on 5000 pages of Fed documents from 2023 - 2025")
-st.markdown("**Choose a question or ask your own**")
+st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
+st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
 
 # Hide Streamlit menu and footer
 st.markdown("""
