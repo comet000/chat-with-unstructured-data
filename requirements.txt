@@ -1,5 +1,5 @@
-streamlit
-snowflake-snowpark-python
-snowflake-core-python
-cachetools
-reportlab
+streamlit==1.50.0
+snowflake-snowpark-python==1.40.0
+snowflake-core==0.10.0
+cachetools==6.2.1
+reportlab==4.4.4
