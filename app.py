@@ -40,8 +40,35 @@ if "rag_cache" not in st.session_state:
     st.session_state.rag_cache = {}
 
 # ======================================================
+# 🔧 CACHE & MESSAGE MANAGEMENT HELPERS
+# ======================================================
+
+def cache_with_limit(cache_dict, key, value, max_size=20):
+    """Add to cache with size limit (FIFO eviction)"""
+    if len(cache_dict) >= max_size and key not in cache_dict:
+        # Remove oldest entry
+        first_key = next(iter(cache_dict))
+        cache_dict.pop(first_key)
+    cache_dict[key] = value
+
+def get_recent_conversation_context(messages, max_pairs=3):
+    """
+    Get only the last N user/assistant pairs for conversation context.
+    This prevents the prompt from growing too large.
+    """
+    user_assistant = [m for m in messages if m["role"] in ["user", "assistant"]]
+    recent = user_assistant[-(max_pairs * 2):]
+    
+    # Format as conversation history string
+    history = []
+    for msg in recent:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        history.append(f"{role}: {msg['content']}")
+    
+    return "\n".join(history) if history else ""
+
+# ======================================================
 # ❄️ SNOWFLAKE CONNECTION
-# (unchanged from your working code)
 # ======================================================
 
 @st.cache_resource
@@ -67,7 +94,7 @@ search_service = (
 )
 
 # ======================================================
-# 🧹 TEXT & FILE HELPERS (unchanged except create_direct_link enhanced)
+# 🧹 TEXT & FILE HELPERS
 # ======================================================
 
 def extract_target_years(query: str) -> List[int]:
@@ -126,8 +153,7 @@ def extract_clean_title(file_name: str) -> str:
 def create_direct_link(file_name: str) -> str:
     """
     Build the correct public URL for any Federal Reserve PDF
-    based on its filename pattern. This function is robust to the
-    relative filenames you uploaded (e.g., 'fomc/BeigeBook_20230118.pdf').
+    based on its filename pattern.
     """
     try:
         base = "https://www.federalreserve.gov"
@@ -138,7 +164,6 @@ def create_direct_link(file_name: str) -> str:
             (r"fomc_longerungoals", f"{base}/monetarypolicy/files/"),
             (r"fomc_longerungoals_2023", f"{base}/monetarypolicy/files/"),
             (r"fomc_longerungoals_2024", f"{base}/monetarypolicy/files/"),
-            (r"fomcprojtabl", f"{base}/monetarypolicy/files/"),
             (r"fomcprojtabl", f"{base}/monetarypolicy/files/"),
             (r"fomcpresconf", f"{base}/mediacenter/files/"),
             (r"presconf", f"{base}/mediacenter/files/"),
@@ -157,11 +182,10 @@ def create_direct_link(file_name: str) -> str:
         return f"{base}/monetarypolicy/files/{name}"
     except Exception as e:
         logging.error(f"create_direct_link failed for {file_name}: {e}")
-        # fallback: just return a safer generic path with the filename appended
         return f"https://www.federalreserve.gov/monetarypolicy/files/{file_name.split('/')[-1]}"
 
 # ======================================================
-# 🔍 RETRIEVER CLASS (unchanged behavior)
+# 🔍 RETRIEVER CLASS
 # ======================================================
 
 class CortexSearchRetriever:
@@ -204,7 +228,7 @@ class CortexSearchRetriever:
 rag_retriever = CortexSearchRetriever(session)
 
 # ======================================================
-# 📘 PROMPT GENERATION (unchanged)
+# 📘 PROMPT GENERATION (OPTIMIZED)
 # ======================================================
 
 glossary = """
@@ -215,70 +239,64 @@ Glossary:
 - Federal Funds Rate Target: The interest rate that the Fed targets for overnight lending between banks.
 """
 
-def build_system_prompt(query: str, contexts: List[dict]) -> str:
+def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
+    """
+    Build an optimized system prompt that doesn't grow with conversation length.
+    Only includes the current query's context + brief conversation history.
+    """
+    # Group contexts by year (limit to top 5 to reduce size)
     year_buckets = {}
-    for c in contexts[:7]:
+    for c in contexts[:5]:  # Reduced from 7 to 5
         year = extract_file_year(c["file_name"])
         if year not in year_buckets:
             year_buckets[year] = []
         year_buckets[year].append(clean_chunk(c["chunk"]))
+    
     grouped_texts = []
     for year in sorted(year_buckets.keys()):
         grouped_texts.append(f"Year {year} excerpts:\n{chr(10).join(year_buckets[year])}")
+    
     context_text = "\n\n".join(grouped_texts)
-    if len(context_text) > 3500:
-        context_text = context_text[:3500]
+    
+    # Strict token limit on context
+    if len(context_text) > 2500:  # Reduced from 3500
+        context_text = context_text[:2500]
 
-    examples = """
-Examples of good answers:
+    # Add conversation history if available (keeps context between questions)
+    history_section = ""
+    if conversation_history:
+        history_section = f"\n\nRecent conversation:\n{conversation_history}\n"
 
-Q: How has the Fed's tone on inflation changed from 2023 to now?
-A: Based on documents from 2023 through 2025, the Fed shifted from serious inflation concerns to cautiously optimistic language as inflation moderated.
-
-Q: Did Powell mention gas prices recently?
-A: In recent press conferences, Powell acknowledged volatility in gas prices but noted their impact on overall inflation has been lessening.
-
-Q: Is the Fed planning rate cuts in 2025?
-A: Projections and dot plot data from late 2024 suggest some participants anticipate rate cuts in 2025, but the Fed emphasizes data-dependence.
-
-Please answer fully and cite relevant document years when appropriate.
-"""
-
-    prompt = f"""
-You are an expert economic analyst specializing in Federal Reserve communications.
+    prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
 
 Today is {datetime.now():%B %d, %Y}.
 
 {glossary}
 
-Use ONLY the following excerpts from FOMC minutes, press conferences, projections, Beige Books, press releases, and Longer-Run Goals to answer the user's question below. Do not invent facts or speculate. When relevant, cite the document type and year (e.g., “According to the January 2025 FOMC Minutes…” or “As stated in the Fed’s 2024 Longer-Run Goals statement…”).
-
-{examples}
+Use ONLY the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
 
 Context excerpts by year:
 
 {context_text}
+{history_section}
+User Question: {query}
 
-User Question:
-{query}
-
-Answer:
-"""
+Answer:"""
+    
     return prompt
 
 # ======================================================
-# 🧠 LLM COMPLETION (Smart Timeout + Fallback)
+# 🧠 LLM COMPLETION (OPTIMIZED)
 # ======================================================
 
-def retrieve_with_timeout(query: str, timeout: float = 30.0, retries: int = 1) -> List[dict]:
+def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -> List[dict]:
     """
-    Wrap rag_retriever.retrieve with a timeout + retry. If retrieval times out,
-    fall back silently to cached results (if any) to avoid breaking the user experience.
+    Wrap rag_retriever.retrieve with timeout + retry + caching.
     """
     if not query:
         return []
 
-    # If cached already, return immediately (fast path)
+    # Check cache first
     if query in st.session_state.rag_cache:
         return st.session_state.rag_cache[query]
 
@@ -290,29 +308,27 @@ def retrieve_with_timeout(query: str, timeout: float = 30.0, retries: int = 1) -
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(_call)
                 results = future.result(timeout=timeout)
-                # Cache results for the session
-                st.session_state.rag_cache[query] = results
+                # Cache with size limit
+                cache_with_limit(st.session_state.rag_cache, query, results, max_size=20)
                 return results
         except concurrent.futures.TimeoutError:
-            logging.warning(f"Retrieval timed out for query (attempt {attempt+1}/{retries}).")
+            logging.warning(f"Retrieval timed out (attempt {attempt+1}/{retries+1})")
             time.sleep(1)
         except Exception as e:
-            logging.error(f"Retrieval error (attempt {attempt+1}/{retries}): {e}")
+            logging.error(f"Retrieval error (attempt {attempt+1}/{retries+1}): {e}")
             time.sleep(1)
 
-    # fallback: return any cached result if available, else empty list
+    # Fallback to cached result if available
     fallback = st.session_state.rag_cache.get(query, [])
     if fallback:
         logging.warning("Using cached retrieval results as fallback.")
-    else:
-        logging.warning("No cached retrieval results available; returning empty list.")
     return fallback
 
-def generate_response_stream(query: str, contexts: List[dict]):
+def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = ""):
     """
-    Streaming call with retries and silent fallback to non-streaming completion.
+    Streaming call with retries and fallback.
     """
-    prompt = build_system_prompt(query, contexts)
+    prompt = build_system_prompt(query, contexts, conversation_history)
 
     def run_completion():
         return complete("claude-3-5-sonnet", prompt, stream=True, session=session)
@@ -322,83 +338,85 @@ def generate_response_stream(query: str, contexts: List[dict]):
         try:
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(run_completion)
-                # Wait up to 90 seconds for streamed completion
-                return future.result(timeout=90)
+                return future.result(timeout=60)  # Reduced from 90
         except concurrent.futures.TimeoutError:
-            logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries}). Retrying...")
+            logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
             time.sleep(2)
         except Exception as e:
-            logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries}): {e}")
+            logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
 
-    # Silent fallback if all streaming attempts fail
+    # Silent fallback to non-streaming
     try:
-        logging.warning("Falling back to non-streaming completion mode.")
+        logging.warning("Falling back to non-streaming completion.")
         backup = complete("claude-3-5-sonnet", prompt, session=session)
-        # ensure it's an iterator of one item to keep downstream logic consistent
         return iter([backup])
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
-        # final fallback: return empty iterator (keeps UI alive, no error shown)
-        return iter([])
+        return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
 # ======================================================
-# 💬 STREAMLIT UI LOGIC (with Context dropdown)
+# 💬 STREAMLIT UI LOGIC
 # ======================================================
 
 if st.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
     st.session_state.rag_cache.clear()
+    st.rerun()
 
-# Display chat history (hide system messages)
+# Display chat history (only user/assistant messages)
 for msg in st.session_state.messages:
-    if msg["role"] != "system":
+    if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"]).write(msg["content"])
 
 def run_query(user_query: str):
-    # Retrieval with silent timeout/fallback
+    """
+    Main query execution - retrieves context and generates response.
+    KEY FIX: Does NOT store system prompts in session state.
+    """
+    # Get recent conversation for context
+    conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
+    
+    # Retrieve context with timeout
     with st.spinner("Searching..."):
-        contexts = retrieve_with_timeout(user_query, timeout=30.0, retries=1)
+        contexts = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
 
-    # If there are contexts, append system prompt (unchanged behavior)
     if not contexts:
-        st.info("No relevant context found.")
-        # still append system prompt with empty contexts so model handles lack of context
-        st.session_state.messages.append({"role": "system", "content": build_system_prompt(user_query, [])})
-        with st.spinner("Generating response..."):
-            stream = generate_response_stream(user_query, [])
-    else:
-        st.session_state.messages.append({"role": "system", "content": build_system_prompt(user_query, contexts)})
-        with st.spinner("Generating response..."):
-            stream = generate_response_stream(user_query, contexts)
+        st.info("No relevant context found. Answering from general knowledge.")
 
-    # Stream and render assistant response token-by-token (keeps old behavior)
+    # Generate response (system prompt is NOT saved to session state)
+    with st.spinner("Generating response..."):
+        stream = generate_response_stream(user_query, contexts, conversation_history)
+
+    # Stream and render assistant response
     response_text = ""
     assistant_container = st.chat_message("assistant", avatar="🤖")
     placeholder = assistant_container.empty()
+    
     for token in stream:
         try:
             response_text += token
             placeholder.markdown(response_text)
         except Exception:
-            # if any streaming chunk causes an error, continue silently
-            logging.exception("Error while streaming chunk; continuing.")
+            logging.exception("Error while streaming chunk")
 
-    # record assistant message
+    # Store ONLY user and assistant messages (NOT system prompts)
     st.session_state.messages.append({"role": "assistant", "content": response_text})
 
-    # --- Context expander (top 3 pieces, clickable links) ---
-    # Use the contexts we successfully retrieved (if any); else use cached fallback or empty
-    top_contexts = (contexts or st.session_state.rag_cache.get(user_query, []))[:3]
+    # Keep message history manageable (limit to last 10 messages)
+    if len(st.session_state.messages) > 10:
+        st.session_state.messages = st.session_state.messages[-10:]
+
+    # Show context sources
+    top_contexts = contexts[:3] if contexts else []
     if top_contexts:
         with st.expander("📄 View Context (top 3)"):
             for c in top_contexts:
                 title = extract_clean_title(c["file_name"])
                 pdf_url = create_direct_link(c["file_name"])
-                snippet = clean_chunk(c["chunk"])[:450]
-                if len(c["chunk"]) > 450:
+                snippet = clean_chunk(c["chunk"])[:350]
+                if len(c["chunk"]) > 350:
                     snippet += "..."
-                # nicer display: label + clickable title to PDF + snippet
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
