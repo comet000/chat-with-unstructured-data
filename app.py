@@ -43,7 +43,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "rag_cache" not in st.session_state:
     from cachetools import LRUCache
-    st.session_state.rag_cache = LRUCache(maxsize=50)
+    st.session_state.rag_cache = LRUCache(maxsize=50)  # Increased for multi-year queries
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
 if "follow_up_suggestions" not in st.session_state:
@@ -203,7 +203,7 @@ def create_direct_link(file_name: str) -> str:
 # ======================================================
 
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit: int = 15):  # Increased for multi-year queries
+    def __init__(self, snowpark_session: Session, limit: int = 12):
         self._root = Root(snowpark_session)
         self._service = search_service
         self.limit = limit
@@ -223,7 +223,7 @@ class CortexSearchRetriever:
 
             target_years = extract_target_years(query)
             if target_years:
-                lower_year = min(target_years) - 3  # Broader range for multi-year queries
+                lower_year = min(target_years) - 2  # Broader range for multi-year queries
                 upper_year = max(target_years) + 1
                 filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
                 if filtered_docs:
@@ -255,7 +255,7 @@ Glossary:
 
 def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
     """
-    Build an optimized system prompt with enhanced trend synthesis for multi-year queries.
+    Build an optimized system prompt with broader inference for multi-year queries.
     """
     # Group contexts by year (limit to top 5 to reduce size)
     year_buckets = {}
@@ -287,7 +287,7 @@ Today is {datetime.now():%B %d, %Y}.
 {glossary}
 
 Use the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
-For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., "Based on 2025 data and assuming 2023-2024 trends continue..."). Provide a partial answer if direct data is limited, clearly stating assumptions.
+For questions spanning multiple years, provide a comprehensive answer by synthesizing available data across years, clearly stating assumptions for missing years (e.g., "Based on 2025 trends and assuming continuity from 2023...").
 If insufficient, respond: "Limited information in the provided documents. Here is a partial answer based on available data..."
 
 Context excerpts by year:
