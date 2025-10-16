@@ -14,6 +14,15 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 
+# Version check for snowflake-core
+try:
+    import snowflake.core
+    logging.info(f"snowflake-core version: {snowflake.core.__version__}")
+except ImportError:
+    logging.error("snowflake-core not installed. Please add to requirements.txt.")
+    st.error("Missing snowflake-core package. Please update requirements.txt and redeploy.")
+    st.stop()
+
 # ======================================================
 # 🔧 INITIAL SETUP
 # ======================================================
