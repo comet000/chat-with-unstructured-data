@@ -1,273 +1,170 @@
 import streamlit as st
-import re
 import logging
+import concurrent.futures
+import time
 from typing import List
-from datetime import datetime
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from snowflake.cortex import complete
 
-# ======================================================
-# 🔧 INITIAL SETUP
-# ======================================================
-
-st.set_page_config(
-    page_title="Chat with the Federal Reserve",
-    page_icon="💬",
-    layout="centered"
-)
-
+# --- Streamlit UI Setup ---
+st.set_page_config(page_title="Chat with the Federal Reserve", page_icon="💬", layout="centered")
 st.title("🏦 Chat with the Federal Reserve")
-st.markdown("**Built on 5000 pages of Fed documents from 2023 - 2025**")
+st.markdown("**Built on 5,000 pages of Federal Reserve documents (2023–2025)**")
 
-# Hide Streamlit default menu and footer for cleaner UI
-st.markdown(
-    """
+# Hide Streamlit default menu and footer
+st.markdown("""
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     </style>
-    """,
-    unsafe_allow_html=True
-)
+""", unsafe_allow_html=True)
 
-# Initialize session state keys
+# --- Initialize state ---
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "rag_cache" not in st.session_state:
     st.session_state.rag_cache = {}
 
-# ======================================================
-# ❄️ SNOWFLAKE CONNECTION
-# ======================================================
-
+# --- Snowflake Session ---
 @st.cache_resource
 def create_snowflake_session():
     connection_parameters = {
-        "account": "fokiamm-yqb60913",
-        "user": "streamlit_demo_user",
-        "password": "RagCortex#78_Pw",
-        "warehouse": "CORTEX_SEARCH_TUTORIAL_WH",
-        "database": "CORTEX_SEARCH_TUTORIAL_DB",
-        "schema": "PUBLIC",
-        "role": "STREAMLIT_READONLY_ROLE",
+        "account": st.secrets["snowflake"]["account"],
+        "user": st.secrets["snowflake"]["user"],
+        "password": st.secrets["snowflake"]["password"],
+        "role": st.secrets["snowflake"]["role"],
+        "warehouse": st.secrets["snowflake"]["warehouse"],
+        "database": st.secrets["snowflake"]["database"],
+        "schema": st.secrets["snowflake"]["schema"],
     }
     return Session.builder.configs(connection_parameters).create()
 
-
 session = create_snowflake_session()
-root = Root(session)
-search_service = (
-    root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-    .schemas["PUBLIC"]
-    .cortex_search_services["FOMC_SEARCH_SERVICE"]
-)
 
-# ======================================================
-# 🧹 TEXT & FILE HELPERS
-# ======================================================
-
-def extract_target_years(query: str) -> List[int]:
-    return [int(y) for y in re.findall(r"20\d{2}", query)]
-
-
-def extract_file_year(file_name: str) -> int:
-    match = re.search(r"(\d{4})", file_name)
-    return int(match.group(1)) if match else 0
-
-
-def clean_chunk(chunk: str) -> str:
-    cleaned = re.sub(r"!\[.*?\]\(.*?\)", "", chunk)
-    cleaned = re.sub(r"#{1,6}\s*", "", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
-
-
-def extract_clean_title(file_name: str) -> str:
-    match = re.search(r"(\d{4})(\d{2})(\d{2})", file_name)
-    month_map = {
-        "01": "January", "02": "February", "03": "March", "04": "April",
-        "05": "May", "06": "June", "07": "July", "08": "August",
-        "09": "September", "10": "October", "11": "November", "12": "December",
-    }
-
-    if match:
-        year, month, day = match.groups()
-        date_str = f"{month_map.get(month, month)} {int(day)}, {year}"
-    else:
-        date_str = "Unknown Date"
-
-    if "minutes" in file_name.lower():
-        doc_type = "FOMC Minutes"
-    elif "proj" in file_name.lower():
-        doc_type = "Summary of Economic Projections"
-    elif "presconf" in file_name.lower():
-        doc_type = "Press Conference"
-    elif "beigebook" in file_name.lower():
-        doc_type = "Beige Book"
-    else:
-        doc_type = "FOMC Document"
-
-    return f"{doc_type} - {date_str}"
-
-
+# --- PDF URL Helper ---
 def create_direct_link(file_name: str) -> str:
-    base_url = "https://www.federalreserve.gov/monetarypolicy/files/"
-    if "presconf" in file_name.lower():
-        base_url = "https://www.federalreserve.gov/mediacenter/files/"
-    return f"{base_url}{file_name}"
+    """
+    Build the correct public URL for any Federal Reserve PDF
+    based on its filename pattern.
+    """
+    base = "https://www.federalreserve.gov"
+    mapping = [
+        (r"BeigeBook_", f"{base}/monetarypolicy/files/BeigeBook_"),
+        (r"FOMC_LongerRunGoals", f"{base}/monetarypolicy/files/FOMC_LongerRunGoals"),
+        (r"fomcprojtabl", f"{base}/monetarypolicy/files/"),
+        (r"FOMCpresconf", f"{base}/mediacenter/files/"),
+        (r"fomcpresconf", f"{base}/mediacenter/files/"),
+        (r"fomcminutes", f"{base}/monetarypolicy/files/"),
+        (r"monetary", f"{base}/monetarypolicy/files/"),
+        (r"financial-stability-report", f"{base}/publications/files/"),
+        (r"mprfullreport", f"{base}/monetarypolicy/files/"),
+    ]
+    for pattern, prefix in mapping:
+        if pattern.lower() in file_name.lower():
+            return prefix + file_name.split("/")[-1]
+    return f"{base}/monetarypolicy/files/{file_name.split('/')[-1]}"
 
-# ======================================================
-# 🔍 RETRIEVER CLASS
-# ======================================================
-
-class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit: int = 20):
-        self._root = Root(snowpark_session)
-        self._service = search_service
-        self.limit = limit
+# --- RAG Retrieval ---
+class RAGRetriever:
+    def __init__(self, session):
+        self.session = session
+        self.root = Root(session)
+        self.collection = self.root.databases[session.get_current_database()] \
+            .schemas[session.get_current_schema()] \
+            .vector_collections["fed_rag_collection"]
 
     def retrieve(self, query: str) -> List[dict]:
         try:
-            raw_results = self._service.search(
-                query=query,
-                columns=["chunk", "file_name"],
-                limit=150
-            ).results
-
-            unique_docs = {r["file_name"]: r for r in raw_results}
-            docs = list(unique_docs.values())
-
-            # Filter by target years if specified
-            target_years = extract_target_years(query)
-            if target_years:
-                lower, upper = min(target_years) - 1, max(target_years)
-                docs = [
-                    d for d in docs
-                    if lower <= extract_file_year(d["file_name"]) <= upper
-                ]
-
-            # Sort and limit results
-            docs = sorted(docs, key=lambda d: extract_file_year(d["file_name"]), reverse=True)
-            docs = docs[:self.limit]
-
+            docs = self.collection.search(query, columns=["chunk", "file_name"], limit=5)
             return [{"chunk": d["chunk"], "file_name": d["file_name"]} for d in docs]
-
         except Exception as e:
             logging.error(f"Cortex Search retrieval error: {e}")
-            st.error(f"❌ Cortex Search Error: {e}")
             return []
 
+rag_retriever = RAGRetriever(session)
 
-rag_retriever = CortexSearchRetriever(session)
-
-# ======================================================
-# 📘 PROMPT GENERATION
-# ======================================================
-
-glossary = """
-Glossary:
-- Dot Plot: A chart showing each FOMC participant's forecast for the federal funds rate.
-- Longer-run Inflation Expectations: Fed members' inflation expectations beyond the near-term future.
-- Beige Book: A report summarizing economic conditions across Fed districts, published 8 times/year.
-- Federal Funds Rate Target: The interest rate that the Fed targets for overnight lending between banks.
-"""
-
-
+# --- System Prompt Builder ---
 def build_system_prompt(query: str, contexts: List[dict]) -> str:
-    year_buckets = {}
-    for c in contexts[:7]:
-        year = extract_file_year(c["file_name"])
-        year_buckets.setdefault(year, []).append(clean_chunk(c["chunk"]))
-
-    grouped_texts = [
-        f"Year {year} excerpts:\n{chr(10).join(year_buckets[year])}"
-        for year in sorted(year_buckets.keys())
-    ]
-
-    context_text = "\n\n".join(grouped_texts)
-    if len(context_text) > 3500:
-        context_text = context_text[:3500]
-
-    examples = """
-Examples of good answers:
-
-Q: How has the Fed's tone on inflation changed from 2023 to now?
-A: Based on documents from 2023 through 2025, the Fed shifted from serious inflation concerns to cautiously optimistic language as inflation moderated.
-
-Q: Did Powell mention gas prices recently?
-A: In recent press conferences, Powell acknowledged volatility in gas prices but noted their impact on overall inflation has been lessening.
-
-Q: Is the Fed planning rate cuts in 2025?
-A: Projections and dot plot data from late 2024 suggest some participants anticipate rate cuts in 2025, but the Fed emphasizes data-dependence.
-
-Please answer fully and cite relevant document years when appropriate.
-"""
-
+    combined_context = "\n\n".join([c["chunk"] for c in contexts])
     return f"""
-You are an expert economic analyst specializing in Federal Reserve communications.
+You are an expert Federal Reserve analyst. Use the context below to answer the user’s question.
 
-Today is {datetime.now():%B %d, %Y}.
+Context:
+{combined_context}
 
-{glossary}
-
-Use ONLY the following excerpts from FOMC minutes, press conferences, projections, and Beige Books to answer the user's question below. Do not invent facts or speculate.
-
-{examples}
-
-Context excerpts by year:
-
-{context_text}
-
-User Question:
+Question:
 {query}
 
-Answer:
-"""
+Provide a clear, factual, and concise answer referencing relevant documents.
+    """
 
-# ======================================================
-# 🧠 LLM COMPLETION
-# ======================================================
-
+# --- Safe Cortex Completion with Timeout and Fallback ---
 def generate_response_stream(query: str, contexts: List[dict]):
     prompt = build_system_prompt(query, contexts)
-    return complete("claude-3-5-sonnet", prompt, stream=True, session=session)
 
-# ======================================================
-# 💬 STREAMLIT UI LOGIC
-# ======================================================
+    def run_completion():
+        return complete("claude-3-5-sonnet", prompt, stream=True, session=session)
 
-if st.button("🧹 Clear Conversation"):
-    st.session_state.messages.clear()
-    st.session_state.rag_cache.clear()
+    max_retries = 2
+    for attempt in range(max_retries + 1):
+        try:
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_completion)
+                return future.result(timeout=90)
+        except concurrent.futures.TimeoutError:
+            logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries}). Retrying...")
+            time.sleep(2)
+        except Exception as e:
+            logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries}): {e}")
+            time.sleep(2)
 
-# Display chat history
+    # Silent fallback
+    try:
+        logging.warning("Falling back to non-streaming completion mode.")
+        backup = complete("claude-3-5-sonnet", prompt, session=session)
+        return iter([backup])
+    except Exception as e:
+        logging.error(f"Backup completion failed: {e}")
+        return iter([])
+
+# --- Streamlit Chat Logic ---
 for msg in st.session_state.messages:
-    if msg["role"] != "system":  # Hide system messages
+    if msg["role"] != "system":
         st.chat_message(msg["role"]).write(msg["content"])
 
-# Query handler
+user_query = st.chat_input("Ask something about recent Fed policy, inflation, or FOMC decisions...")
+
 def run_query(user_query: str):
-    with st.spinner("Searching..."):
+    with st.spinner("Searching relevant Fed documents..."):
         contexts = rag_retriever.retrieve(user_query)
 
-    if not contexts:
-        st.info("No relevant context found.")
-        return ["No relevant documents found."]
+    with st.expander("🔍 See Retrieved Context"):
+        if not contexts:
+            st.info("No relevant documents found.")
+        for item in contexts:
+            pdf_url = create_direct_link(item["file_name"])
+            snippet = item["chunk"][:600]
+            snippet += "..." if len(item["chunk"]) > 600 else ""
+            st.markdown(f"**📄 [{item['file_name'].split('/')[-1]}]({pdf_url})**")
+            st.write(snippet)
 
-    st.session_state.messages.append({
-        "role": "system",
-        "content": build_system_prompt(user_query, contexts),
-    })
+    if not contexts:
+        return ["No relevant context found."]
+
+    st.session_state.messages.append({"role": "system", "content": build_system_prompt(user_query, contexts)})
 
     with st.spinner("Generating response..."):
-        return generate_response_stream(user_query, contexts)
+        stream = generate_response_stream(user_query, contexts)
+        response_text = ""
+        with st.chat_message("assistant"):
+            placeholder = st.empty()
+            for chunk in stream:
+                response_text += chunk
+                placeholder.markdown(response_text)
 
-# Chat input
-user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
-if user_input:
-    st.chat_message("user").write(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    stream = run_query(user_input)
-    final_answer = st.chat_message("assistant", avatar="🤖").write_stream(stream)
-    st.session_state.messages.append({"role": "assistant", "content": final_answer})
+        st.session_state.messages.append({"role": "assistant", "content": response_text})
+
+if user_query:
+    st.session_state.messages.append({"role": "user", "content": user_query})
+    run_query(user_query)
