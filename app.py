@@ -43,7 +43,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "rag_cache" not in st.session_state:
     from cachetools import LRUCache
-    st.session_state.rag_cache = LRUCache(maxsize=50)  # Increased for multi-year queries
+    st.session_state.rag_cache = LRUCache(maxsize=20)
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
 if "follow_up_suggestions" not in st.session_state:
@@ -223,8 +223,8 @@ class CortexSearchRetriever:
 
             target_years = extract_target_years(query)
             if target_years:
-                lower_year = min(target_years) - 2  # Broader range for multi-year queries
-                upper_year = max(target_years) + 1
+                lower_year = min(target_years) - 1
+                upper_year = max(target_years)
                 filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
                 if filtered_docs:
                     docs = filtered_docs
@@ -255,7 +255,7 @@ Glossary:
 
 def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
     """
-    Build an optimized system prompt with broader inference for multi-year queries.
+    Build an optimized system prompt with limited context size and inference encouragement.
     """
     # Group contexts by year (limit to top 5 to reduce size)
     year_buckets = {}
@@ -286,9 +286,9 @@ Today is {datetime.now():%B %d, %Y}.
 
 {glossary}
 
-Use the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
-For questions spanning multiple years, provide a comprehensive answer by synthesizing available data across years, clearly stating assumptions for missing years (e.g., "Based on 2025 trends and assuming continuity from 2023...").
-If insufficient, respond: "Limited information in the provided documents. Here is a partial answer based on available data..."
+Use ONLY the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
+If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating any assumptions (e.g., "Assuming trends from 2024 continue...").
+If insufficient, respond: "Insufficient information in the provided documents. Please check the Federal Reserve website for more details."
 
 Context excerpts by year:
 
@@ -368,7 +368,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
-                return iter(["Limited information in the provided documents. Here is a partial answer based on available data..."])
+                return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
@@ -411,14 +411,14 @@ for msg in st.session_state.messages:
 predefined_questions = [
     "What was the federal funds rate target range in January 2023?",
     "Why did the Federal Reserve pause rate hikes in 2023?",
-    "What were the key risks discussed in the January 2025 FOMC minutes?",
-    "How did the Beige Book describe economic conditions in July 2024?",
-    "What were the FOMC’s inflation projections in December 2025?",
-    "What factors influenced the Fed’s rate cut decisions in September 2025?",
-    "How did nonbank vulnerabilities affect monetary policy in November 2024?",
-    "What labor market indicators were mentioned in the 2025 FOMC minutes?",
-    "What were the key points from the June 2023 FOMC press conference?",
-    "What regional economic trends were noted in the April 2023 Beige Book?",
+    "What were the key risks discussed in the 2025 FOMC minutes?",
+    "How did the Beige Book describe economic conditions in 2024?",
+    "What were the FOMC’s inflation projections for 2025?",
+    "What factors influenced the Fed’s rate cut decisions in 2025?",
+    "How did nonbank vulnerabilities affect monetary policy in 2024?",
+    "What were the labor market indicators mentioned in 2025 FOMC documents?",
+    "How did supply-side shocks impact CPI in 2023-2025?",
+    "What regional divergences were noted in the 2023 Beige Book?",
 ]
 
 def get_dynamic_follow_ups(query: str) -> List[str]:
