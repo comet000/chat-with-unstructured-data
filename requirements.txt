@@ -2,3 +2,7 @@ streamlit
 snowflake-snowpark-python
 cachetools
 reportlab
+snowflake-ml-python
+trulens-core
+trulens-providers-cortex
+trulens-connectors-snowflake
