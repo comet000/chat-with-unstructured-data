@@ -3,6 +3,7 @@ import re
 import logging
 import concurrent.futures
 import time
+import os
 from typing import List
 from datetime import datetime
 from snowflake.snowpark import Session
@@ -40,6 +41,9 @@ if "rag_cache" not in st.session_state:
     from cachetools import LRUCache
     st.session_state.rag_cache = LRUCache(maxsize=20)
 
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # ======================================================
 # 🔧 CACHE & MESSAGE MANAGEMENT HELPERS
 # ======================================================
@@ -66,24 +70,51 @@ def get_recent_conversation_context(messages, max_pairs=2):
 
 @st.cache_resource
 def create_snowflake_session():
-    connection_parameters = {
-        "account": st.secrets["snowflake"]["account"],
-        "user": st.secrets["snowflake"]["user"],
-        "password": st.secrets["snowflake"]["password"],
-        "warehouse": "CORTEX_SEARCH_TUTORIAL_WH",
-        "database": "CORTEX_SEARCH_TUTORIAL_DB",
-        "schema": "PUBLIC",
-        "role": "STREAMLIT_READONLY_ROLE",
-    }
-    return Session.builder.configs(connection_parameters).create()
+    try:
+        # Use flat secrets as provided in Streamlit Cloud
+        connection_parameters = {
+            "account": st.secrets["account"],
+            "user": st.secrets["user"],
+            "password": st.secrets["password"],
+            "warehouse": st.secrets["warehouse"],
+            "database": st.secrets["database"],
+            "schema": st.secrets["schema"],
+            "role": st.secrets["role"],
+        }
+    except (KeyError, TypeError) as e:
+        logging.error(f"Failed to load secrets from Streamlit: {e}")
+        # Fallback to environment variables
+        connection_parameters = {
+            "account": os.getenv("SNOWFLAKE_ACCOUNT", "fokiamm-yqb60913"),
+            "user": os.getenv("SNOWFLAKE_USER", "streamlit_demo_user"),
+            "password": os.getenv("SNOWFLAKE_PASSWORD", "RagCortex#78_Pw"),
+            "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "CORTEX_SEARCH_TUTORIAL_WH"),
+            "database": os.getenv("SNOWFLAKE_DATABASE", "CORTEX_SEARCH_TUTORIAL_DB"),
+            "schema": os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC"),
+            "role": os.getenv("SNOWFLAKE_ROLE", "STREAMLIT_READONLY_ROLE"),
+        }
+        st.error("Failed to load Snowflake credentials from secrets. Using fallback environment variables. Please check Streamlit Cloud secrets configuration.")
+    
+    try:
+        session = Session.builder.configs(connection_parameters).create()
+        logging.info("Snowflake session created successfully")
+        return session
+    except Exception as e:
+        logging.error(f"Failed to create Snowflake session: {e}")
+        st.error(f"Cannot connect to Snowflake: {e}. Please check credentials and try again.")
+        raise
 
-session = create_snowflake_session()
-root = Root(session)
-search_service = (
-    root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-    .schemas["PUBLIC"]
-    .cortex_search_services["FOMC_SEARCH_SERVICE"]
-)
+try:
+    session = create_snowflake_session()
+    root = Root(session)
+    search_service = (
+        root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
+        .schemas["PUBLIC"]
+        .cortex_search_services["FOMC_SEARCH_SERVICE"]
+    )
+except Exception as e:
+    st.error("Failed to initialize Snowflake connection. Please check logs and secrets configuration.")
+    st.stop()
 
 # ======================================================
 # 🧹 TEXT & FILE HELPERS
@@ -103,12 +134,12 @@ def clean_chunk(chunk: str) -> str:
     return cleaned
 
 def extract_clean_title(file_name: str) -> str:
-    match = re.search(r"(\d{4})(\d{2})(\d{2})", file_name)
     month_map = {
         "01": "January", "02": "February", "03": "March", "04": "April",
         "05": "May", "06": "June", "07": "July", "08": "August",
         "09": "September", "10": "October", "11": "November", "12": "December",
     }
+    match = re.search(r"(\d{4})(\d{2})(\d{2})", file_name)
     if match:
         year, month, day = match.groups()
         date_str = f"{month_map.get(month, month)} {int(day)}, {year}"
@@ -142,8 +173,6 @@ def create_direct_link(file_name: str) -> str:
         mapping = [
             (r"beigebook", f"{base}/monetarypolicy/files/"),
             (r"fomc_longerungoals", f"{base}/monetarypolicy/files/"),
-            (r"fomc_longerungoals_2023", f"{base}/monetarypolicy/files/"),
-            (r"fomc_longerungoals_2024", f"{base}/monetarypolicy/files/"),
             (r"fomcprojtabl", f"{base}/monetarypolicy/files/"),
             (r"fomcpresconf", f"{base}/mediacenter/files/"),
             (r"presconf", f"{base}/mediacenter/files/"),
@@ -166,7 +195,7 @@ def create_direct_link(file_name: str) -> str:
 # ======================================================
 
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit: int = 12):
+    def __init__(self, snowpark_session: Session, limit LCCE: int = 12):
         self._root = Root(snowpark_session)
         self._service = search_service
         self.limit = limit
@@ -218,12 +247,11 @@ Glossary:
 
 def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
     """
-    Build an optimized system prompt that doesn't grow with conversation length.
-    Only includes the current query's context + brief conversation history.
+    Build an optimized system prompt with limited context size and inference encouragement.
     """
     # Group contexts by year (limit to top 5 to reduce size)
     year_buckets = {}
-    for c in contexts[:5]:  # Reduced from 7 to 5
+    for c in contexts[:5]:
         year = extract_file_year(c["file_name"])
         if year not in year_buckets:
             year_buckets[year] = []
@@ -235,11 +263,11 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
     
     context_text = "\n\n".join(grouped_texts)
     
-    # Strict token limit on context
-    if len(context_text) > 1500:  # Reduced from 2500
+    # Strict character limit on context
+    if len(context_text) > 1500:
         context_text = context_text[:1500]
 
-    # Add conversation history if available (keeps context between questions)
+    # Add conversation history if available
     history_section = ""
     if conversation_history:
         history_section = f"\n\nRecent conversation:\n{conversation_history}\n"
@@ -251,7 +279,7 @@ Today is {datetime.now():%B %d, %Y}.
 {glossary}
 
 Use ONLY the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
-If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating any assumptions.
+If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating any assumptions (e.g., "Assuming trends from 2024 continue...").
 If insufficient, respond: "Insufficient information in the provided documents. Please check the Federal Reserve website for more details."
 
 Context excerpts by year:
@@ -270,7 +298,7 @@ Answer:"""
 
 def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -> List[dict]:
     """
-    Wrap rag_retriever.retrieve with timeout + retry + caching.
+    Wrap rag_retriever.retrieve with timeout, retry, and caching.
     """
     if not query:
         return []
@@ -293,7 +321,6 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(_call)
                 results = future.result(timeout=timeout)
-                # Cache with size limit
                 cache_with_limit(st.session_state.rag_cache, norm_query, results)
                 return results
         except concurrent.futures.TimeoutError:
@@ -311,34 +338,37 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
 
 def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
     """
-    Streaming call with retries and fallback.
+    Streaming call with retries and fallback to faster model.
     """
     prompt = build_system_prompt(query, contexts, conversation_history)
 
-    def run_completion():
-        return complete(model, prompt, stream=True, session=session)
+    def run_completion(model_to_use):
+        return complete(model_to_use, prompt, stream=True, session=session)
 
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
             with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_completion)
-                return future.result(timeout=60)  # Reduced from 90
+                future = executor.submit(run_completion, model)
+                return future.result(timeout=30)  # Reduced from 60
         except concurrent.futures.TimeoutError:
             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
-            st.warning("Response took too long. Providing partial answer...")
-            prompt = build_system_prompt(query, contexts[:5], "")  # Use fewer contexts
+            st.warning("Response took too long. Trying faster model...")
             try:
+                # Fallback to faster model with fewer contexts
+                prompt = build_system_prompt(query, contexts[:3], "")
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
-            except:
+            except Exception as e:
+                logging.error(f"Fallback completion failed: {e}")
                 return iter(["Insufficient information in the provided documents. Please check https://www.federalreserve.gov."])
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
 
-    # Silent fallback to non-streaming
+    # Final fallback
     try:
         logging.warning("Falling back to non-streaming completion.")
+        prompt = build_system_prompt(query, contexts[:3], "")
         backup = complete("mixtral-8x7b", prompt, session=session)
         return iter([backup])
     except Exception as e:
@@ -354,31 +384,30 @@ if st.button("🧹 Clear Conversation"):
     st.session_state.rag_cache.clear()
     st.rerun()
 
-# Display chat history (only user/assistant messages)
+# Display chat history
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
-        st.chat_message(msg["role"]).write(msg["content"])
+        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
 def run_query(user_query: str):
     """
-    Main query execution - retrieves context and generates response.
-    KEY FIX: Does NOT store system prompts in session state.
+    Main query execution with logging for production monitoring.
     """
-    # Get recent conversation for context
+    start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
     
-    # Retrieve context with timeout
-    with st.spinner("Searching..."):
+    # Retrieve context
+    with st.spinner("Searching documents..."):
         contexts = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
+    retrieval_time = time.time() - start_time
 
     if not contexts:
         st.info("No relevant context found. Answering from general knowledge.")
 
-    # Generate response (system prompt is NOT saved to session state)
+    # Generate response
     with st.spinner("Generating response..."):
         stream = generate_response_stream(user_query, contexts, conversation_history)
-
-    # Stream and render assistant response
+    
     response_text = ""
     assistant_container = st.chat_message("assistant", avatar="🤖")
     placeholder = assistant_container.empty()
@@ -386,44 +415,43 @@ def run_query(user_query: str):
     for token in stream:
         try:
             response_text += token
-            placeholder.markdown(response_text)
+            placeholder.markdown(response_text, unsafe_allow_html=False)
         except Exception:
             logging.exception("Error while streaming chunk")
 
-    # Store ONLY user and assistant messages (NOT system prompts)
+    generation_time = time.time() - start_time - retrieval_time
     st.session_state.messages.append({"role": "assistant", "content": response_text})
 
-    # Keep message history manageable (limit to last 10 messages)
+    # Limit message history
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
 
     # Show context sources
     top_contexts = contexts[:5] if contexts else []
-    if top_contexts:
-        with st.expander("📄 View Context (top 5)", expanded=False):
+    with st.expander("📄 View Context (top 5)", expanded=False):
+        if not top_contexts:
+            st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
+        else:
             for c in top_contexts:
                 title = extract_clean_title(c["file_name"])
                 pdf_url = create_direct_link(c["file_name"])
-                snippet = clean_chunk(c["chunk"])[:350]
-                if len(c["chunk"]) > 350:
-                    snippet += "..."
+                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
-    else:
-        st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
-    
+
     # Suggested follow-ups
     st.write("Suggested follow-ups: Why did this happen? What are the projections for next year?")
     
     # Log to Snowflake
     try:
+        context_size = sum(len(c["chunk"]) for c in contexts)
         session.sql(f"""
             INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
-                query, response, num_contexts, timestamp
+                query, response, num_contexts, context_size, retrieval_time, generation_time, timestamp
             ) VALUES (
                 '{user_query.replace("'", "''")}', '{response_text.replace("'", "''")}',
-                {len(contexts)}, CURRENT_TIMESTAMP()
+                {len(contexts)}, {context_size}, {retrieval_time}, {generation_time}, CURRENT_TIMESTAMP()
             )
         """).collect()
     except Exception as e:
@@ -432,7 +460,7 @@ def run_query(user_query: str):
 # Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
 if user_input:
-    st.chat_message("user").write(user_input)
+    st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
 
