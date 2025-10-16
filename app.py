@@ -201,4 +201,73 @@ A: In recent press conferences, Powell acknowledged volatility in gas prices but
 Q: Is the Fed planning rate cuts in 2025?
 A: Projections and dot plot data from late 2024 suggest some participants anticipate rate cuts in 2025, but the Fed emphasizes data-dependence.
 
-Please answer fully and cite rel
+Please answer fully and cite relevant document years when appropriate.
+"""
+
+    return f"""
+You are an expert economic analyst specializing in Federal Reserve communications.
+
+Today is {datetime.now():%B %d, %Y}.
+
+{glossary}
+
+Use ONLY the following excerpts from FOMC minutes, press conferences, projections, and Beige Books to answer the user's question below. Do not invent facts or speculate.
+
+{examples}
+
+Context excerpts by year:
+
+{context_text}
+
+User Question:
+{query}
+
+Answer:
+"""
+
+# ======================================================
+# 🧠 LLM COMPLETION
+# ======================================================
+
+def generate_response_stream(query: str, contexts: List[dict]):
+    prompt = build_system_prompt(query, contexts)
+    return complete("claude-3-5-sonnet", prompt, stream=True, session=session)
+
+# ======================================================
+# 💬 STREAMLIT UI LOGIC
+# ======================================================
+
+if st.button("🧹 Clear Conversation"):
+    st.session_state.messages.clear()
+    st.session_state.rag_cache.clear()
+
+# Display chat history
+for msg in st.session_state.messages:
+    if msg["role"] != "system":  # Hide system messages
+        st.chat_message(msg["role"]).write(msg["content"])
+
+# Query handler
+def run_query(user_query: str):
+    with st.spinner("Searching..."):
+        contexts = rag_retriever.retrieve(user_query)
+
+    if not contexts:
+        st.info("No relevant context found.")
+        return ["No relevant documents found."]
+
+    st.session_state.messages.append({
+        "role": "system",
+        "content": build_system_prompt(user_query, contexts),
+    })
+
+    with st.spinner("Generating response..."):
+        return generate_response_stream(user_query, contexts)
+
+# Chat input
+user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
+if user_input:
+    st.chat_message("user").write(user_input)
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    stream = run_query(user_input)
+    final_answer = st.chat_message("assistant", avatar="🤖").write_stream(stream)
+    st.session_state.messages.append({"role": "assistant", "content": final_answer})
