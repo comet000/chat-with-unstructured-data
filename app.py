@@ -195,7 +195,7 @@ def create_direct_link(file_name: str) -> str:
 # ======================================================
 
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit LCCE: int = 12):
+    def __init__(self, snowpark_session: Session, limit: int = 12):
         self._root = Root(snowpark_session)
         self._service = search_service
         self.limit = limit
@@ -350,7 +350,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         try:
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(run_completion, model)
-                return future.result(timeout=30)  # Reduced from 60
+                return future.result(timeout=30)
         except concurrent.futures.TimeoutError:
             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
             st.warning("Response took too long. Trying faster model...")
