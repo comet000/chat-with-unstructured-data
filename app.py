@@ -14,13 +14,22 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 
-# Version check for snowflake-core
+# Version checks for snowflake dependencies
 try:
     import snowflake.core
     logging.info(f"snowflake-core version: {snowflake.core.__version__}")
 except ImportError:
     logging.error("snowflake-core not installed. Please add to requirements.txt.")
     st.error("Missing snowflake-core package. Please update requirements.txt and redeploy.")
+    st.stop()
+
+try:
+    import snowflake.cortex
+    import snowflake.connector
+    logging.info(f"snowflake-connector-python version: {snowflake.connector.__version__}")
+except ImportError:
+    logging.error("snowflake-connector-python or snowflake.cortex not installed. Please add snowflake-connector-python to requirements.txt.")
+    st.error("Missing snowflake-connector-python package. Please update requirements.txt and redeploy.")
     st.stop()
 
 # ======================================================
