@@ -296,7 +296,73 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         logging.error(f"Backup completion failed: {e}")
         return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
-# STREAMLIT UI LOGIC
+def get_dynamic_follow_ups(query: str) -> List[str]:
+    """
+    Generate relevant follow-up questions based on the query content.
+    """
+    query_lower = query.lower()
+    if "rate" in query_lower or "fed funds" in query_lower:
+        return ["Why were rates adjusted?", "What are the projected rates for next year?"]
+    elif "inflation" in query_lower or "cpi" in query_lower:
+        return ["What factors drove inflation?", "How does inflation compare to the Fed's target?"]
+    elif "beige book" in query_lower:
+        return ["What were the regional differences?", "How did specific sectors perform?"]
+    elif "labor" in query_lower or "employment" in query_lower:
+        return ["What are the unemployment trends?", "How do wages impact policy?"]
+    elif "fomc" in query_lower or "meeting" in query_lower:
+        return ["What were the key discussion points?", "How did the FOMC's views change over time?"]
+    else:
+        return ["Why did this happen?", "What are the projections for next year?"]
+
+def create_pdf(history_md: str) -> BytesIO:
+    """
+    Generate a PDF version of the chat history with enhanced formatting.
+    """
+    buffer = BytesIO()
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    styles = getSampleStyleSheet()
+    styles['Normal'].fontName = 'Helvetica'
+    styles['Normal'].fontSize = 11
+    styles['Normal'].leading = 14
+    styles['Heading1'].fontName = 'Helvetica-Bold'
+    styles['Heading1'].fontSize = 16
+    styles['Heading1'].leading = 18
+    styles['Title'].fontName = 'Helvetica-Bold'
+    styles['Title'].fontSize = 18
+    styles['Title'].textColor = colors.darkblue
+    story = []
+    story.append(Paragraph(f"Chat History - {current_time}", styles["Title"]))
+    story.append(Spacer(1, 18))
+    for line in history_md.split("\n"):
+        if line.startswith("# Chat History"):
+            story.append(Paragraph("Conversation History", styles["Heading1"]))
+            story.append(Spacer(1, 12))
+        elif line.startswith("#"):
+            clean_line = re.sub(r'^#+', '', line).strip()
+            story.append(Paragraph(clean_line, styles["Heading1"]))
+            story.append(Spacer(1, 12))
+        elif line.startswith("**"):
+            role, content = line.split("**: ", 1)
+            story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
+            story.append(Spacer(1, 10))
+        elif line.startswith("- **"):
+            parts = line.split("** (")
+            if len(parts) > 1:
+                title = parts[1].split(")", 1)[0]
+                rest = parts[1].split(")", 1)[1] if len(parts[1].split(")", 1)) > 1 else ""
+                snippet = rest.strip() if rest and "\n" in rest else ""
+                story.append(Paragraph(f"- <b>{title.strip()}</b> ({parts[0].replace('- **', '')})", styles["Normal"]))
+                if snippet:
+                    story.append(Paragraph(snippet, styles["Normal"]))
+                    story.append(Spacer(1, 8))
+        else:
+            story.append(Paragraph(line, styles["Normal"]))
+            story.append(Spacer(1, 8))
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
 def run_query(user_query: str):
     """
     Main query execution with logging for production monitoring.
