@@ -317,7 +317,7 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 01:50 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:00 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
@@ -404,7 +404,11 @@ def run_query(user_query: str):
                 st.divider()
 
 # INITIAL SETUP
-st.set_page_config(layout="wide", page_title="Chat with the Federal Reserve", page_icon="💬")
+st.set_page_config(
+    page_title="Chat with the Federal Reserve",
+    page_icon="💬",
+    layout="centered"
+)
 st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
 st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
 st.markdown(
@@ -424,44 +428,42 @@ if "rag_cache" not in st.session_state:
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
 
-# COLUMN LAYOUT
-left_col, main_col, right_col = st.columns([1, 3, 1])
+# SIDEBAR FOR EXAMPLE QUESTIONS
+st.sidebar.header("Example Questions")
+example_questions = [
+    "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
+    "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
+    "Are businesses still struggling with costs?",
+    "What's the median rate projection for next year?",
+    "What's the Fed's plan going forward?",
+    "To what extent do tariff policy and trade disruptions factor into your inflation outlook and decision-making?",
+    "When and how fast should the Fed cut rates (if at all)?",
+    "How exposed is the financial system to a shift in sentiment or asset revaluation?",
+    "Are supply chain issues still showing up regionally?",
+    "How did the FOMC view the economic outlook in mid-2023?",
+    "What were the key points discussed in the FOMC meeting in January 2023?",
+    "How did the FOMC assess the labor market in mid-2024?",
+    "What was the fed funds rate target range effective September 19, 2024?",
+]
+for question in example_questions:
+    if st.sidebar.button(question, key=f"example_{question[:50]}"):
+        st.chat_message("user", avatar="👤").write(question)
+        st.session_state.messages.append({"role": "user", "content": question})
+        run_query(question)
 
-with left_col:
-    st.header("Example Questions")
-    example_questions = [
-        "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
-        "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
-        "Are businesses still struggling with costs?",
-        "What's the median rate projection for next year?",
-        "What's the Fed's plan going forward?",
-        "To what extent do tariff policy and trade disruptions factor into your inflation outlook and decision-making?",
-        "When and how fast should the Fed cut rates (if at all)?",
-        "How exposed is the financial system to a shift in sentiment or asset revaluation?",
-        "Are supply chain issues still showing up regionally?",
-        "How did the FOMC view the economic outlook in mid-2023?",
-        "What were the key points discussed in the FOMC meeting in January 2023?",
-        "How did the FOMC assess the labor market in mid-2024?",
-        "What was the fed funds rate target range effective September 19, 2024?",
-    ]
-    for question in example_questions:
-        if st.button(question, key=f"example_{question[:50]}"):
-            st.session_state.messages.append({"role": "user", "content": question})
-            run_query(question)
+# MAIN CHAT INTERFACE
+for msg in st.session_state.messages:
+    if msg["role"] in ["user", "assistant"]:
+        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
-with main_col:
-    # Display chat history
-    for msg in st.session_state.messages:
-        if msg["role"] in ["user", "assistant"]:
-            st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
-    
-    # Chat input
-    user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
-    if user_input:
-        st.chat_message("user", avatar="👤").write(user_input)
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        run_query(user_input)
+user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
+if user_input:
+    st.chat_message("user", avatar="👤").write(user_input)
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    run_query(user_input)
 
+# RIGHT COLUMN FOR CONVERSATION TOOLS
+main_col, right_col = st.columns([3, 1])
 with right_col:
     st.header("Conversation Tools")
     st.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
@@ -478,5 +480,6 @@ with right_col:
         st.write("Suggested Follow-ups:")
         for suggestion in follow_ups:
             if st.button(suggestion):
+                st.chat_message("user", avatar="👤").write(suggestion)
                 st.session_state.messages.append({"role": "user", "content": suggestion})
                 run_query(suggestion)
