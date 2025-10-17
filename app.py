@@ -394,7 +394,7 @@ st.set_page_config(
     layout="centered"
 )
 st.title("🏦 Chat with the Federal Reserve")
-st.markdown("**Built on 5000 pages of Fed documents from 2023 - 2025.**")
+st.markdown("**5,000 pages of Fed insights at your fingertips (2023 - 2025)**")
 # Hide Streamlit default menu and footer for cleaner UI
 st.markdown(
     """
