@@ -340,10 +340,14 @@ def create_pdf(history_md: str) -> BytesIO:
             role, content = line.split("**: ", 1)
             story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
         elif line.startswith("- **"):
-            title, rest = line.split("** (", 1)
-            url, snippet = rest.split(")\n ", 1)
-            story.append(Paragraph(f"- **{title.strip()}** ({url.strip()})", styles["Normal"]))
-            story.append(Paragraph(snippet, styles["Normal"]))
+            parts = line.split("** (")
+            if len(parts) > 1:
+                title = parts[1].split(")", 1)[0]
+                rest = parts[1].split(")", 1)[1] if len(parts[1].split(")", 1)) > 1 else ""
+                snippet = rest.strip() if rest and "\n" in rest else ""
+                story.append(Paragraph(f"- **{title.strip()}** ({parts[0].replace('- **', '')})", styles["Normal"]))
+                if snippet:
+                    story.append(Paragraph(snippet, styles["Normal"]))
         else:
             story.append(Paragraph(line, styles["Normal"]))
         story.append(Spacer(1, 12))
@@ -398,6 +402,19 @@ def run_query(user_query: str):
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
+   
+    # Create APP_LOGS table if it doesn't exist
+    session.sql("""
+        CREATE TABLE IF NOT EXISTS CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
+            query STRING,
+            response STRING,
+            num_contexts INTEGER,
+            context_size INTEGER,
+            retrieval_time FLOAT,
+            generation_time FLOAT,
+            timestamp TIMESTAMP
+        )
+    """).collect()
    
     # Log to Snowflake
     try:
