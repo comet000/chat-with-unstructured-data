@@ -15,7 +15,6 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
-from cachetools import LRUCache
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -408,6 +407,19 @@ def run_query(user_query: str):
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
+  
+    # Render buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🧹 Clear Conversation"):
+            st.session_state.messages.clear()
+            st.session_state.rag_cache.clear()
+            st.rerun()
+    with col2:
+        # MODIFICATION: Call create_pdf with the full message history, which now includes contexts for each message.
+        if st.session_state.messages:
+            pdf_buffer = create_pdf(st.session_state.messages)
+            st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
 
 # INITIAL SETUP
 st.set_page_config(
@@ -431,20 +443,8 @@ st.markdown(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "rag_cache" not in st.session_state:
+    from cachetools import LRUCache
     st.session_state.rag_cache = LRUCache(maxsize=20)
-
-# MODIFICATION: Place buttons in the main UI to ensure they are always visible
-# when a conversation is active.
-if st.session_state.messages:
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🧹 Clear Conversation"):
-            st.session_state.messages.clear()
-            st.session_state.rag_cache.clear()
-            st.rerun()
-    with col2:
-        pdf_buffer = create_pdf(st.session_state.messages)
-        st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
 
 # STREAMLIT UI LOGIC
 # Display chat history
@@ -483,4 +483,3 @@ for question in example_questions:
         # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
-
