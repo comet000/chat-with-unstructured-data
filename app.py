@@ -395,22 +395,6 @@ def run_query(user_query: str):
     # Limit message history
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
-    
-    # Show context sources
-    with st.expander("📄 View Context (top 5)", expanded=False):
-        if not top_contexts:
-            st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
-        else:
-            for c in top_contexts:
-                title = extract_clean_title(c["file_name"])
-                pdf_url = create_direct_link(c["file_name"])
-                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                st.markdown(f"**[{title}]({pdf_url})**")
-                st.caption(snippet)
-                st.divider()
-    
-    # Rerun the script to update the UI and show the buttons
-    st.rerun()
 
 # INITIAL SETUP
 st.set_page_config(
@@ -442,9 +426,21 @@ for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
-# MODIFICATION: Render buttons in the main UI flow if a conversation is active.
-# This ensures they are always present and functional.
-if st.session_state.messages:
+# After displaying all messages, show the context and buttons for the LAST assistant message.
+if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
+    top_contexts = st.session_state.messages[-1].get("contexts", [])
+    with st.expander("📄 View Context (top 5)", expanded=True):
+        if not top_contexts:
+            st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
+        else:
+            for c in top_contexts:
+                title = extract_clean_title(c["file_name"])
+                pdf_url = create_direct_link(c["file_name"])
+                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
+                st.markdown(f"**[{title}]({pdf_url})**")
+                st.caption(snippet)
+                st.divider()
+    
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🧹 Clear Conversation"):
@@ -462,6 +458,8 @@ if user_input:
     # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
     run_query(user_input)
+    st.rerun() # Rerun to display the context and buttons immediately.
+
 
 # Example questions in sidebar
 st.sidebar.header("Example Questions")
@@ -486,4 +484,5 @@ for question in example_questions:
         # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
+        st.rerun() # Rerun to display the context and buttons immediately.
 
