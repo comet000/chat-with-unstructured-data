@@ -464,7 +464,12 @@ if user_input:
 
 
 # Example questions in sidebar
-st.sidebar.header("Example Questions")
+st.sidebar.markdown(
+    """
+    <h3 style='text-align: right;'>Example Questions</h3>
+    """,
+    unsafe_allow_html=True
+)
 example_questions = [
     "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
     "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
