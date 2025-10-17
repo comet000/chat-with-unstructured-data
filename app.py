@@ -317,7 +317,7 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:10 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:14 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
@@ -416,18 +416,6 @@ st.markdown(
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    .right-panel {
-        position: fixed;
-        top: 70px;
-        right: 10px;
-        width: 300px;
-        background-color: #f9f9f9;
-        padding: 1rem;
-        border-left: 1px solid #ddd;
-        height: 90vh;
-        overflow-y: auto;
-        z-index: 1000;
-    }
     </style>
     """,
     unsafe_allow_html=True
@@ -440,28 +428,48 @@ if "rag_cache" not in st.session_state:
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
 
-# SIDEBAR FOR EXAMPLE QUESTIONS
-st.sidebar.header("Example Questions")
-example_questions = [
-    "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
-    "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
-    "Are businesses still struggling with costs?",
-    "What's the median rate projection for next year?",
-    "What's the Fed's plan going forward?",
-    "To what extent do tariff policy and trade disruptions factor into your inflation outlook and decision-making?",
-    "When and how fast should the Fed cut rates (if at all)?",
-    "How exposed is the financial system to a shift in sentiment or asset revaluation?",
-    "Are supply chain issues still showing up regionally?",
-    "How did the FOMC view the economic outlook in mid-2023?",
-    "What were the key points discussed in the FOMC meeting in January 2023?",
-    "How did the FOMC assess the labor market in mid-2024?",
-    "What was the fed funds rate target range effective September 19, 2024?",
-]
-for question in example_questions:
-    if st.sidebar.button(question, key=f"example_{question[:50]}"):
-        st.chat_message("user", avatar="👤").write(question)
-        st.session_state.messages.append({"role": "user", "content": question})
-        run_query(question)
+# SIDEBAR WITH EXPANDERS
+with st.sidebar:
+    with st.expander("Example Questions", expanded=True):
+        example_questions = [
+            "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
+            "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
+            "Are businesses still struggling with costs?",
+            "What's the median rate projection for next year?",
+            "What's the Fed's plan going forward?",
+            "To what extent do tariff policy and trade disruptions factor into your inflation outlook and decision-making?",
+            "When and how fast should the Fed cut rates (if at all)?",
+            "How exposed is the financial system to a shift in sentiment or asset revaluation?",
+            "Are supply chain issues still showing up regionally?",
+            "How did the FOMC view the economic outlook in mid-2023?",
+            "What were the key points discussed in the FOMC meeting in January 2023?",
+            "How did the FOMC assess the labor market in mid-2024?",
+            "What was the fed funds rate target range effective September 19, 2024?",
+        ]
+        for question in example_questions:
+            if st.button(question, key=f"example_{question[:50]}"):
+                st.chat_message("user", avatar="👤").write(question)
+                st.session_state.messages.append({"role": "user", "content": question})
+                run_query(question)
+
+    with st.expander("Conversation Tools", expanded=False):
+        st.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
+        if st.session_state.messages:
+            history_md = "\n".join([
+                "# Chat History",
+                *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
+                *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
+                *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
+            ])
+            st.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
+            last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
+            follow_ups = get_dynamic_follow_ups(last_response)
+            st.write("Suggested Follow-ups:")
+            for suggestion in follow_ups:
+                if st.button(suggestion):
+                    st.chat_message("user", avatar="👤").write(suggestion)
+                    st.session_state.messages.append({"role": "user", "content": suggestion})
+                    run_query(suggestion)
 
 # MAIN CHAT INTERFACE
 for msg in st.session_state.messages:
@@ -473,25 +481,3 @@ if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
-
-# RIGHT PANEL FOR CONVERSATION TOOLS
-st.markdown("<div class='right-panel'>", unsafe_allow_html=True)
-st.header("Conversation Tools")
-st.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
-if st.session_state.messages:
-    history_md = "\n".join([
-        "# Chat History",
-        *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
-        *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
-        *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
-    ])
-    st.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
-    last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
-    follow_ups = get_dynamic_follow_ups(last_response)
-    st.write("Suggested Follow-ups:")
-    for suggestion in follow_ups:
-        if st.button(suggestion):
-            st.chat_message("user", avatar="👤").write(suggestion)
-            st.session_state.messages.append({"role": "user", "content": suggestion})
-            run_query(suggestion)
-st.markdown("</div>", unsafe_allow_html=True)
