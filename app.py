@@ -310,7 +310,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT") # October 17, 2025 03:50 PM EDT
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT").replace("0", "", 1) # October 17, 2025 4:06 PM EDT
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
@@ -332,6 +332,13 @@ def create_pdf(history_md: str) -> BytesIO:
                 link_part = parts[0][2:]
                 story.append(Paragraph(title_date, styles["Normal"]))
                 story.append(Paragraph(link_part, styles["Normal"]))
+                # Handle nested bullet points
+                if "\n" in line:
+                    sub_lines = line.split("\n")
+                    for sub_line in sub_lines[1:]:
+                        if sub_line.startswith("* "):
+                            story.append(Paragraph(sub_line[2:], styles["Normal"]))
+                            story.append(Spacer(1, 3))
             story.append(Spacer(1, 6))
         elif line and ":" in line:
             try:
@@ -419,8 +426,7 @@ def run_query(user_query: str):
         history_md = "\n".join([
             "# Chat History",
             *[f"User: {msg['content']}" if msg['role'] == 'user' else f"Assistant: {msg['content']}" for msg in st.session_state.messages],
-            *(["# Sources Used in Last Response"] if st.session_state.last_contexts else ["# Sources"]),
-            *([f"- {create_direct_link(c['file_name'])} ( {extract_clean_title(c['file_name'])} )\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
+            *([f"# Sources Used in Last Response" if st.session_state.last_contexts else "# Sources"] + [f"- {create_direct_link(c['file_name'])} ( {extract_clean_title(c['file_name'])} )\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."]) for _ in range(len(st.session_state.messages) // 2 + 1 if st.session_state.messages else 1)
         ])
         pdf_buffer = create_pdf(history_md)
         st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
