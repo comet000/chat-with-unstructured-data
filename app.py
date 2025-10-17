@@ -4,7 +4,7 @@ import logging
 import concurrent.futures
 import time
 import os
-from typing import List
+from typing: List
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
@@ -119,7 +119,7 @@ try:
     search_service = (
         root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
         .schemas["PUBLIC"]
-        .cortex_search_services["FOMC_SEARCH_SERVICE"]
+        .cortex_search_service["FOMC_SEARCH_SERVICE"]
     )
 except Exception as e:
     st.error("Failed to initialize Snowflake connection.")
@@ -156,7 +156,7 @@ def extract_clean_title(file_name: str) -> str:
         doc_type = "Beige Book"
     elif "longerungoals" in fname or "fomc_longerungoals" in fname:
         doc_type = "FOMC Longer-Run Goals"
-    elif "presconf" in fname or "fomcpresconf" in fname:
+    elif "presconf" in fname or "fomcpressconf" in fname:
         doc_type = "Press Conference"
     elif "projtabl" in fname or "fomcprojtabl" in fname:
         doc_type = "Projection Tables"
@@ -218,7 +218,7 @@ class CortexSearchRetriever:
 
             target_years = extract_target_years(query)
             if target_years:
-                lower_year = min(target_years) - 1  # Slight flexibility for adjacent years
+                lower_year = min(target_years)
                 upper_year = max(target_years) + 1
                 filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
                 if filtered_docs:
@@ -273,7 +273,7 @@ Today is {datetime.now():%B %d, %Y}.
 {glossary}
 
 Use the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year with specific dates (e.g., "According to the FOMC Minutes - December 18, 2024...").
-For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., "Based on 2025 data and assuming 2023-2024 trends continue..."). Provide a partial answer if direct data is limited, clearly stating assumptions.
+For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., "Based on 2025 data and assuming 2023-2024 trends continue..."). If limited context, synthesize based on available data without apologizing; cite specific dates when available.
 If insufficient, provide a partial answer based on available data without apology.
 
 Context excerpts by year:
@@ -306,9 +306,9 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         try:
             with concurrent.futures.ThreadPoolExecutor() as executor:
                 future = executor.submit(_call)
-                results = future.result(timeout=timeout)
-                cache_with_limit(st.session_state.rag_cache, norm_query, results)
-                return results
+                result = future.result(timeout=timeout)
+                cache_with_limit(st.session_state.rag_cache, norm_query, result)
+                return result
         except concurrent.futures.TimeoutError:
             logging.warning(f"Retrieval timed out (attempt {attempt+1}/{retries+1})")
             time.sleep(1)
@@ -321,8 +321,8 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
 
-def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
-    prompt = build_system_prompt(query, contexts, conversation_history)
+def generate_response_stream(query: str, context: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
+    prompt = build_system_prompt(query, context, conversation_history)
 
     def run_completion(model_to_use):
         return complete(model_to_use, prompt, stream=True, session=session)
@@ -337,7 +337,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
             st.warning("Response took too long. Trying faster model...")
             try:
-                prompt = build_system_prompt(query, contexts[:3], "")
+                prompt = build_system_prompt(query, context[:3], "")
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
@@ -348,12 +348,91 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
 
     try:
         logging.warning("Falling back to non-streaming completion.")
-        prompt = build_system_prompt(query, contexts[:3], "")
+        prompt = build_system_prompt(query, context[:3], "")
         backup = complete("mixtral-8x7b", prompt, session=session)
         return iter([backup])
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
-        return iter(["Limited information in the provided documents. Here is a partial answer based on available data..."])
+        return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
+
+def get_dynamic_follow_ups(query: str) -> List[str]:
+    query_lower = query.lower()
+    if "rate" in query_lower or "fed funds" in query_lower:
+        return ["Why were rates adjusted?", "What are the projected rates for next year?"]
+    elif "inflation" in query_lower or "cpi" in query_lower:
+        return ["What factors drove inflation?", "How does inflation compare to the Fed's target?"]
+    elif "beige book" in query_lower:
+        return ["What were the regional differences?", "How did specific sectors perform?"]
+    elif "labor" in query_lower or "employment" in query_lower:
+        return ["What are the unemployment trends?", "How do wages impact policy?"]
+    elif "fomc" in query_lower or "meeting" in query_lower:
+        return ["What were the key discussion points?", "How did the FOMC's views change over time?"]
+    else:
+        return ["Why did this happen?", "What are the projections for next year?"]
+
+def create_pdf(history_md: str) -> BytesIO:
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter)
+    style = getSampleStyleSheet()
+    story = []
+    for line in history_md.split("\n"):
+        if line.startswith("#"):
+            story.append(Paragraph(line.lstrip("# "), style["Title"]))
+        elif line.startswith("**"):
+            role, content = line.split("**: ", 1)
+            story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", style["Normal"]))
+        elif line.startswith("- **"):
+            story.append(Paragraph(line, style["Normal"]))
+        else:
+            story.append(Paragraph(line, style["Normal"]))
+        story.append(Spacer(1, 12))
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+def run_query(user_query: str):
+    start_time = time.time()
+    conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
+    
+    with st.spinner("Searching documents..."):
+        context = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
+    
+    if not context:
+        st.info("No relevant context found. Answering from general knowledge.")
+
+    st.session_state.last_contexts = context[:5]
+    with st.spinner("Generating response..."):
+        stream = generate_response_stream(user_query, context, conversation_history)
+    
+    response_text = ""
+    assistant_container = st.chat_message("assistant", avatar="🤖")
+    placeholder = assistant_container.empty()
+    
+    for token in stream:
+        try:
+            response_text += token
+            placeholder.markdown(response_text, unsafe_allow_html=False)
+        except Exception:
+            logging.exception("Error while streaming chunk")
+
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
+    st.session_state.has_queried = True
+    st.session_state.follow_up_suggestions = get_dynamic_follow_up(query)
+
+    if len(st.session_state.messages) > 10:
+        st.session_state.messages = st.session_state.messages[-10:]
+
+    top_contexts = context[:5] if context else []
+    with st.expander("📄 View Context (top 5)", expanded=False):
+        if not top_contexts:
+            st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
+        else:
+            for c in top_contexts:
+                title = extract_clean_title(c["file_name"])
+                pdf_url = create_direct_link(c["file_name"])
+                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
+                st.markdown(f"- **{title}** ({pdf_url})\n  {snippet}")
+                st.divider()
 
 # STREAMLIT UI LOGIC
 with st.sidebar:
@@ -388,18 +467,14 @@ with st.sidebar:
                 st.rerun()
 
 # Display chat history
-chat_container = st.container()
-with chat_container:
-    for msg in st.session_state.messages:
-        if msg["role"] in ["user", "assistant"]:
-            st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+for msg in st.session_state.messages:
+    if msg["role"] in ["user", "assistant"]:
+        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
 # Chat input
 user_input = st.chat_input("Ask your question about the Federal Reserve...")
-
 if user_input:
-    with chat_container:
-        st.chat_message("user", avatar="👤").write(user_input)
+    st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
     st.rerun()
@@ -416,7 +491,7 @@ with col1:
         st.rerun()
 with col2:
     if st.button("📥 Download Conversation"):
-        current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT")
+        current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EST")
         history_md = f"# Chat History - {current_time}\n\n"
         for msg in st.session_state.messages:
             history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
