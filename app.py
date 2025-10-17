@@ -395,7 +395,7 @@ st.set_page_config(
 )
 st.markdown(
     """
-    <div style='display: inline-block; text-align: right;'>
+    <div style='display: inline-block; text-align: right; margin-right: 5px;'>
         <h1>🏦 Chat with the Federal Reserve</h1>
         <div style='font-weight: bold; font-size: 18px;'>
             5,000 pages of Fed insights at your fingertips (2023 - 2025)
