@@ -333,7 +333,27 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
 # ======================================================
 with st.sidebar:
     st.write("Conversation Tools")
-    st.write("Example Questions")
+    with st.expander("Example Questions"):
+        example_questions = [
+            "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
+            "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
+            "Are businesses still struggling with costs?",
+            "What's the median rate projection for next year?",
+            "What's the Fed's plan going forward?",
+            "To what extent do tariff policy and trade disruptions factor into your inflation outlook and decision-making?",
+            "When and how fast should the Fed cut rates (if at all)?",
+            "How exposed is the financial system to a shift in sentiment or asset revaluation?",
+            "Are supply chain issues still showing up regionally?",
+            "How did the FOMC view the economic outlook in mid-2023?",
+            "What were the key points discussed in the FOMC meeting in January 2023?",
+            "How did the FOMC assess the labor market in mid-2024?",
+            "What was the fed funds rate target range effective September 19, 2024?"
+        ]
+        for question in example_questions:
+            if st.button(question, key=f"example_{question[:50]}"):
+                st.chat_message("user", avatar="👤").write(question)
+                st.session_state.messages.append({"role": "user", "content": question})
+                run_query(question)
 
 if st.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
@@ -396,7 +416,7 @@ def run_query(user_query: str):
    
     # Log to Snowflake
     try:
-        context_size = sum(len(c["chunk"]) for c in contexts)
+        context_size = sum(len(c["chunk"] for c in contexts))
         session.sql(f"""
             INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
                 query, response, num_contexts, context_size, retrieval_time, generation_time, timestamp
