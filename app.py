@@ -4,7 +4,6 @@ import logging
 import concurrent.futures
 import time
 import os
-import html
 from typing import List
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -309,50 +308,88 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         logging.error(f"Backup completion failed: {e}")
         return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
-def create_pdf(messages: List[dict]) -> BytesIO:
-    """
-    Creates a PDF document from the chat history.
-    - Fixes missing bullet point content by processing full messages.
-    - Fixes time formatting to remove leading zeros from hours.
-    - Includes sources for each assistant response.
-    """
+def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    
-    # Issue 2 Fix: Format time correctly, removing leading zero from the hour.
-    now = datetime.now(ZoneInfo("America/New_York"))
-    hour = now.strftime("%I").lstrip('0')
-    current_time = now.strftime(f"%B %d, %Y {hour}:%M %p EDT")
-
+    # Fix for issue 2: Simplify time format (remove leading zeros)
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT").replace(" 0", " ")
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
-    
+    # Header with date and time
     story.append(Paragraph(f"Chat History - {current_time}", styles["Title"]))
     story.append(Spacer(1, 12))
     
-    for msg in messages:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        
-        # Issue 1 Fix: Preserve all response content by replacing newlines with <br/> tags.
-        # This prevents the PDF parser from splitting multi-line responses incorrectly.
-        content = html.escape(msg['content']).replace('\n', '<br/>')
-        
-        p_text = f"<b>{role}:</b><br/>{content}"
-        story.append(Paragraph(p_text, styles["Normal"]))
-        story.append(Spacer(1, 12))
-
-        # Issue 3 Fix: Add sources after each assistant response, not just the last one.
-        if msg["role"] == "assistant" and msg.get("contexts"):
-            story.append(Paragraph("<b>Sources Used in Response:</b>", styles["Heading3"]))
-            story.append(Spacer(1, 6))
-            for c in msg["contexts"]:
-                title = extract_clean_title(c['file_name'])
-                link = create_direct_link(c['file_name'])
-                source_text = f"• <a href='{link}' color='blue'>{title}</a>"
-                story.append(Paragraph(source_text, styles["Normal"]))
-                story.append(Spacer(1, 4))
-            story.append(Spacer(1, 12))
+    # Process chat history - FIXED for issues 1 and 3
+    in_sources_section = False
+    current_sources = []
+    
+    for line in history_md.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
             
+        if line.startswith("# Chat History"):
+            continue
+        elif line.startswith("# Sources Used in Last Response"):
+            # Start a new sources section for each response
+            in_sources_section = True
+            current_sources = []
+            story.append(Paragraph("Sources", styles["Heading1"]))
+            story.append(Spacer(1, 6))
+        elif line.startswith("- ") and in_sources_section:
+            # Collect source information
+            current_sources.append(line)
+            # Extract the main source line
+            parts = line.split(" (")
+            if len(parts) > 1:
+                title_date = parts[1].rstrip(")")
+                link_part = parts[0][2:]
+                story.append(Paragraph(f"• {title_date}", styles["Normal"]))
+                story.append(Paragraph(f"  {link_part}", styles["Normal"]))
+                story.append(Spacer(1, 3))
+        elif line.startswith("* ") and in_sources_section:
+            # Handle nested bullet points in sources
+            story.append(Paragraph(f"  ◦ {line[2:]}", styles["Normal"]))
+            story.append(Spacer(1, 3))
+        elif line and ":" in line and not in_sources_section:
+            # Handle conversation messages (user and assistant)
+            try:
+                role, content = line.split(": ", 1)
+                # Fix for issue 1: Preserve bullet points in content
+                formatted_content = content
+                
+                # Convert markdown-style bullets to proper formatting
+                lines = formatted_content.split('\n')
+                formatted_lines = []
+                
+                for content_line in lines:
+                    content_line = content_line.strip()
+                    if content_line.startswith('- '):
+                        # Main bullet point
+                        formatted_lines.append(f"• {content_line[2:]}")
+                    elif content_line.startswith('* '):
+                        # Sub bullet point  
+                        formatted_lines.append(f"  ◦ {content_line[2:]}")
+                    elif content_line.startswith('1. ') or content_line.startswith('2. ') or content_line.startswith('3. '):
+                        # Numbered list - remove the numbers and use bullets
+                        formatted_lines.append(f"• {content_line[3:]}")
+                    else:
+                        formatted_lines.append(content_line)
+                
+                formatted_content = '<br/>'.join(formatted_lines)
+                
+                story.append(Paragraph(f"<b>{role}:</b> {formatted_content}", styles["Normal"]))
+                story.append(Spacer(1, 12))
+            except ValueError:
+                logging.warning(f"Skipping invalid line in PDF: {line}")
+                continue
+        elif line and not line.startswith("-") and not line.startswith("*") and not line.startswith("#"):
+            # End of sources section
+            in_sources_section = False
+            if current_sources:
+                story.append(Spacer(1, 12))
+                current_sources = []
+
     doc.build(story)
     buffer.seek(0)
     return buffer
@@ -370,7 +407,8 @@ def run_query(user_query: str):
     retrieval_time = time.time() - start_time
     if not contexts:
         st.info("No relevant context found. Answering from general knowledge.")
-    
+    # Store contexts for export
+    st.session_state.last_contexts = contexts[:5]
     # Generate response
     with st.spinner("Generating response..."):
         stream = generate_response_stream(user_query, contexts, conversation_history)
@@ -386,16 +424,12 @@ def run_query(user_query: str):
         except Exception:
             logging.exception("Error while streaming chunk")
     generation_time = time.time() - start_time - retrieval_time
-    
-    # MODIFICATION: Attach the contexts used for this specific response to the message object.
-    top_contexts = contexts[:5] if contexts else []
-    st.session_state.messages.append({"role": "assistant", "content": response_text, "contexts": top_contexts})
-
+    st.session_state.messages.append({"role": "assistant", "content": response_text})
     # Limit message history
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
-    
     # Show context sources
+    top_contexts = contexts[:5] if contexts else []
     with st.expander("📄 View Context (top 5)", expanded=False):
         if not top_contexts:
             st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
@@ -408,18 +442,53 @@ def run_query(user_query: str):
                 st.caption(snippet)
                 st.divider()
   
+    # Log to Snowflake (commented out due to privilege error)
+    # try:
+    # context_size = sum(len(c["chunk"]) for c in contexts)
+    # session.sql(f"""
+    # INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
+    # query, response, num_contexts, context_size, retrieval_time, generation_time, timestamp
+    # ) VALUES (
+    # '{user_query.replace("'", "''")}', '{response_text.replace("'", "''")}',
+    # {len(contexts)}, {context_size}, {retrieval_time}, {generation_time}, CURRENT_TIMESTAMP()
+    # )
+    # """).collect()
+    # except Exception as e:
+    # logging.error(f"Logging failed: {e}")
     # Render buttons
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🧹 Clear Conversation"):
             st.session_state.messages.clear()
             st.session_state.rag_cache.clear()
+            st.session_state.last_contexts.clear()
             st.rerun()
     with col2:
-        # MODIFICATION: Call create_pdf with the full message history, which now includes contexts for each message.
-        if st.session_state.messages:
-            pdf_buffer = create_pdf(st.session_state.messages)
-            st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
+        # Build history markdown with sources for all responses
+        history_md = "# Chat History\n"
+        for i, msg in enumerate(st.session_state.messages):
+            if msg["role"] == 'user':
+                history_md += f"User: {msg['content']}\n"
+            else:
+                history_md += f"Assistant: {msg['content']}\n"
+                # Add sources section after each assistant response
+                history_md += "# Sources Used in Last Response\n"
+                # For simplicity, using the last contexts for all responses
+                # In a more advanced version, you could store contexts per response
+                contexts_to_use = st.session_state.last_contexts
+                if contexts_to_use:
+                    for c in contexts_to_use:
+                        title = extract_clean_title(c["file_name"])
+                        pdf_url = create_direct_link(c["file_name"])
+                        snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
+                        history_md += f"- {pdf_url} ( {title} )\n"
+                        history_md += f"* {snippet}\n"
+                else:
+                    history_md += "- No documents found for this query\n"
+                history_md += "\n"
+        
+        pdf_buffer = create_pdf(history_md)
+        st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
 
 # INITIAL SETUP
 st.set_page_config(
@@ -445,6 +514,8 @@ if "messages" not in st.session_state:
 if "rag_cache" not in st.session_state:
     from cachetools import LRUCache
     st.session_state.rag_cache = LRUCache(maxsize=20)
+if "last_contexts" not in st.session_state:
+    st.session_state.last_contexts = []
 
 # STREAMLIT UI LOGIC
 # Display chat history
@@ -456,8 +527,7 @@ for msg in st.session_state.messages:
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
 if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
-    # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
-    st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
+    st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
 
 # Example questions in sidebar
@@ -480,6 +550,5 @@ example_questions = [
 for question in example_questions:
     if st.sidebar.button(question, key=f"example_{question[:50]}"):
         st.chat_message("user", avatar="👤").write(question)
-        # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
-        st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
+        st.session_state.messages.append({"role": "user", "content": question})
         run_query(question)
