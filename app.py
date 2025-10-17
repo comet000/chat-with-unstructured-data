@@ -53,17 +53,9 @@ def create_snowflake_session():
         }
     except (KeyError, TypeError) as e:
         logging.error(f"Failed to load secrets from Streamlit: {e}")
-        # Fallback to environment variables
-        connection_parameters = {
-            "account": os.getenv("SNOWFLAKE_ACCOUNT", "fokiamm-yqb60913"),
-            "user": os.getenv("SNOWFLAKE_USER", "streamlit_demo_user"),
-            "password": os.getenv("SNOWFLAKE_PASSWORD", "RagCortex#78_Pw"),
-            "warehouse": os.getenv("SNOWFLAKE_WAREHOUSE", "CORTEX_SEARCH_TUTORIAL_WH"),
-            "database": os.getenv("SNOWFLAKE_DATABASE", "CORTEX_SEARCH_TUTORIAL_DB"),
-            "schema": os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC"),
-            "role": os.getenv("SNOWFLAKE_ROLE", "STREAMLIT_READONLY_ROLE"),
-        }
-        st.error("Failed to load Snowflake credentials from secrets. Using fallback environment variables. Please check Streamlit Cloud secrets configuration.")
+        st.error("Failed to load Snowflake credentials from secrets. Please check your Streamlit Cloud secrets configuration.")
+        # Stop execution if secrets are not found
+        st.stop()
   
     try:
         session = Session.builder.configs(connection_parameters).create()
@@ -485,4 +477,3 @@ for question in example_questions:
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
         st.rerun() # Rerun to display the context and buttons immediately.
-
