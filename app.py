@@ -6,6 +6,7 @@ import time
 import os
 from typing import List
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from snowflake.cortex import complete
@@ -214,6 +215,7 @@ class CortexSearchRetriever:
                 if r["file_name"] not in unique_docs:
                     unique_docs[r["file_name"]] = r
             docs = list(unique_docs.values())
+
             target_years = extract_target_years(query)
             if target_years:
                 lower_year = min(target_years)
@@ -221,9 +223,12 @@ class CortexSearchRetriever:
                 filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
                 if filtered_docs:
                     docs = filtered_docs
+
             docs = sorted(docs, key=lambda d: extract_file_year(d["file_name"]), reverse=True)
             docs = docs[:self.limit]
+
             return [{"chunk": d["chunk"], "file_name": d["file_name"]} for d in docs]
+
         except Exception as e:
             logging.error(f"Cortex Search retrieval error: {e}")
             st.error(f"❌ Cortex Search Error: {e}")
@@ -261,16 +266,24 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
     if conversation_history:
         history_section = f"\n\nRecent conversation:\n{conversation_history}\n"
 
+    # Use EDT for consistency with your current time
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT")
     prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
-Today is {datetime.now():%B %d, %Y}.
+
+Today is {current_time}.
+
 {glossary}
-Use ONLY the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year (e.g., "According to the January 2025 FOMC Minutes...").
+
+Use the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year with specific dates (e.g., "According to the FOMC Minutes - December 18, 2024..."). Avoid vague references like '2025 FOMC excerpt' unless the exact date is unavailable.
 For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., "Based on 2025 data and assuming 2023-2024 trends continue..."). Provide a partial answer if direct data is limited, clearly stating assumptions.
 If insufficient, respond: "Limited information in the provided documents. Here is a partial answer based on available data..."
+
 Context excerpts by year:
+
 {context_text}
 {history_section}
 User Question: {query}
+
 Answer:"""
     
     return prompt
@@ -279,10 +292,12 @@ Answer:"""
 def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -> List[dict]:
     if not query:
         return []
+
     def normalize_query(q):
         return re.sub(r'[^\w\s]', '', q.lower()).strip()
     
     norm_query = normalize_query(query)
+
     if norm_query in st.session_state.rag_cache:
         return st.session_state.rag_cache[norm_query]
 
@@ -310,12 +325,10 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
 
 def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
     prompt = build_system_prompt(query, contexts, conversation_history)
+
     def run_completion(model_to_use):
-        try:
-            return complete(model_to_use, prompt, stream=True, session=session)
-        except Exception as e:
-            logging.error(f"Cortex completion failed: {e}")
-            raise
+        return complete(model_to_use, prompt, stream=True, session=session)
+
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
@@ -334,6 +347,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
+
     try:
         logging.warning("Falling back to non-streaming completion.")
         prompt = build_system_prompt(query, contexts[:3], "")
@@ -419,8 +433,7 @@ def run_query(user_query: str):
                 title = extract_clean_title(c["file_name"])
                 pdf_url = create_direct_link(c["file_name"])
                 snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                st.markdown(f"**[{title}]({pdf_url})**")
-                st.caption(snippet)
+                st.markdown(f"- **{title}** ({pdf_url})\n  {snippet}")
                 st.divider()
 
 # STREAMLIT UI LOGIC
@@ -453,40 +466,43 @@ with st.sidebar:
                 st.session_state.messages.append({"role": "user", "content": suggestion})
                 run_query(suggestion)
 
-if st.button("🧹 Clear Conversation"):
-    st.session_state.messages.clear()
-    st.session_state.rag_cache.clear()
-    st.session_state.last_contexts.clear()
-    st.session_state.follow_up_suggestions = []
-    st.session_state.has_queried = False
-    st.rerun()
-
+# Display chat history
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
-st.markdown("### Ask a Question")
+# Chat input
 user_input = st.chat_input("Ask your question about the Federal Reserve...")
-
 if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
 
-st.markdown("### Download Conversation")
-if st.button("📥 Download as PDF"):
-    history_md = f"# Chat History - {datetime.now():%B %d, %Y %H:%M}\n\n"
-    for msg in st.session_state.messages:
-        history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
-    if st.session_state.last_contexts:
-        history_md += "## Sources Used in Last Response\n\n"
-        for c in st.session_state.last_contexts:
-            title = extract_clean_title(c["file_name"])
-            pdf_url = create_direct_link(c["file_name"])
-            snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-            history_md += f"- **{title}** ([Link]({pdf_url}))\n  {snippet}\n\n"
-    else:
-        history_md += "## Sources\n\nNo documents found for the last query.\n"
-    
-    pdf_buffer = create_pdf(history_md)
-    st.download_button("Download Chat History as PDF", pdf_buffer, "chat_history.pdf", "application/pdf", key="download_pdf")
+# Buttons below chat input
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("🧹 Clear Conversation"):
+        st.session_state.messages.clear()
+        st.session_state.rag_cache.clear()
+        st.session_state.last_contexts.clear()
+        st.session_state.follow_up_suggestions = []
+        st.session_state.has_queried = False
+        st.rerun()
+with col2:
+    if st.button("📥 Download Conversation"):
+        current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT")
+        history_md = f"# Chat History - {current_time}\n\n"
+        for msg in st.session_state.messages:
+            history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
+        if st.session_state.last_contexts:
+            history_md += "## Sources Used in Last Response\n\n"
+            for c in st.session_state.last_contexts:
+                title = extract_clean_title(c["file_name"])
+                pdf_url = create_direct_link(c["file_name"])
+                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
+                history_md += f"- **{title}** ({pdf_url})\n  {snippet}\n\n"
+        else:
+            history_md += "## Sources\n\nNo documents found for the last query.\n"
+        
+        pdf_buffer = create_pdf(history_md)
+        st.download_button("Download Chat History as PDF", pdf_buffer, "chat_history.pdf", "application/pdf", key="download_pdf")
