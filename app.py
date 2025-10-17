@@ -322,7 +322,7 @@ def create_pdf(messages: List[dict]) -> BytesIO:
     # Issue 2 Fix: Format time correctly, removing leading zero from the hour.
     now = datetime.now(ZoneInfo("America/New_York"))
     hour = now.strftime("%I").lstrip('0')
-    current_time = now.strftime(f"%B %d, %Y {hour}:%M %p EDT")
+    current_time = now.strftime(f"%B %d, %Y {hour}:%M p EDT")
 
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -408,6 +408,9 @@ def run_query(user_query: str):
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
+    
+    # Rerun the script to update the UI and show the buttons
+    st.rerun()
 
 # INITIAL SETUP
 st.set_page_config(
