@@ -397,7 +397,7 @@ st.title("🏦 Chat with the Federal Reserve")
 
 st.markdown(
     """
-    <div style='text-align: center; font-weight: bold;'>
+    <div style='text-align: right; font-weight: bold;'>
         5,000 pages of Fed insights at your fingertips (2023 - 2025)
     </div>
     """,
@@ -414,6 +414,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 # Initialize session state keys
 if "messages" not in st.session_state:
     st.session_state.messages = []
