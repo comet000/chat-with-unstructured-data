@@ -393,8 +393,8 @@ st.set_page_config(
     page_icon="💬",
     layout="centered"
 )
-st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
-st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
+st.title("🏦 Chat with the Federal Reserve")
+st.markdown("**Built on 5000 pages of Fed documents from 2023 - 2025.**")
 # Hide Streamlit default menu and footer for cleaner UI
 st.markdown(
     """
@@ -443,7 +443,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
         st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
 
 # Chat input
-user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
+user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, insights, or history...")
 if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
