@@ -4,7 +4,7 @@ import logging
 import concurrent.futures
 import time
 import os
-from typing: List
+from typing import List
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
