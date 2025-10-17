@@ -81,7 +81,7 @@ except Exception as e:
 def extract_target_years(query: str) -> List[int]:
     return [int(y) for y in re.findall(r"20\d{2}", query)]
 
-def extract_file_year(file_name: str) -> int
+def extract_file_year(file_name: str) -> int:
     match = re.search(r"(\d{4})", file_name)
     return int(match.group(1)) if match else 0
 
@@ -448,7 +448,7 @@ if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
-    run_query(user_input)
+    run_query(user_query)
     st.rerun() # Rerun to display the context and buttons immediately.
 
 
