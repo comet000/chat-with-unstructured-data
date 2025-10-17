@@ -4,7 +4,7 @@ import logging
 import concurrent.futures
 import time
 import os
-from typing import List  # Corrected import syntax
+from typing import List
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
@@ -22,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 st.set_page_config(
     page_title="Chat with the Federal Reserve",
     page_icon="💬",
-    layout="centered"
+    layout="wide"
 )
 
 st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
@@ -198,7 +198,7 @@ def create_direct_link(file_name: str) -> str:
 
 # RETRIEVER CLASS
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit: int = 12):
+    def __init__(self, snowpark_session: Session, limit: int = 20):  # Increased limit to 20
         self._root = Root(snowpark_session)
         self._service = search_service
         self.limit = limit
@@ -218,7 +218,7 @@ class CortexSearchRetriever:
 
             target_years = extract_target_years(query)
             if target_years:
-                lower_year = min(target_years)
+                lower_year = min(target_years) - 1  # Adjusted to include adjacent years
                 upper_year = max(target_years) + 1
                 filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
                 if filtered_docs:
@@ -268,13 +268,13 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
 
     prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
 
-Today is {datetime.now():%B %d, %Y}.
+Today is {datetime.now(ZoneInfo("America/New_York")).strftime('%B %d, %Y %I:%M %p EST')}.
 
 {glossary}
 
-Use the following excerpts from FOMC documents to answer the user's question. Do not invent facts. When relevant, cite the document type and year with specific dates (e.g., "According to the FOMC Minutes - December 18, 2024...").
-For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., "Based on 2025 data and assuming 2023-2024 trends continue..."). If limited context, synthesize based on available data without apologizing; cite specific dates when available.
-If insufficient, provide a partial answer based on available data without apology.
+Use the following excerpts from FOMC documents (covering 2023–2025) to answer the user's question. Do not invent facts. When relevant, cite the document type and year with specific dates (e.g., 'According to the FOMC Minutes - December 18, 2024...').
+For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., 'Based on 2025 data and assuming 2023-2024 trends continue...'). If limited context, synthesize based on available data; cite specific dates when available.
+If insufficient, provide a partial answer based on available data.
 
 Context excerpts by year:
 
@@ -341,7 +341,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
-                return iter(["Limited information in the provided documents. Here is a partial answer based on available data..."])
+                return iter(["Limited information available. Here is a partial answer based on available data..."])
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
@@ -405,34 +405,37 @@ def run_query(user_query: str):
         stream = generate_response_stream(user_query, contexts, conversation_history)
     
     response_text = ""
-    assistant_container = st.chat_message("assistant", avatar="🤖")
-    placeholder = assistant_container.empty()
-    
-    for token in stream:
-        try:
-            response_text += token
-            placeholder.markdown(response_text, unsafe_allow_html=False)
-        except Exception:
-            logging.exception("Error while streaming chunk")
+    with st.container():
+        assistant_container = st.chat_message("assistant", avatar="🤖")
+        placeholder = assistant_container.empty()
+        
+        for token in stream:
+            try:
+                response_text += token
+                placeholder.markdown(response_text, unsafe_allow_html=False)
+            except Exception:
+                logging.exception("Error while streaming chunk")
 
     st.session_state.messages.append({"role": "assistant", "content": response_text})
     st.session_state.has_queried = True
     st.session_state.follow_up_suggestions = get_dynamic_follow_ups(user_query)
+    st.rerun()  # Refresh sidebar immediately
 
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
 
-    top_contexts = contexts[:5] if contexts else []
-    with st.expander("📄 View Context (top 5)", expanded=False):
-        if not top_contexts:
-            st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
-        else:
-            for c in top_contexts:
-                title = extract_clean_title(c["file_name"])
-                pdf_url = create_direct_link(c["file_name"])
-                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                st.markdown(f"- **{title}** ({pdf_url})\n  {snippet}")
-                st.divider()
+    with st.container():
+        top_contexts = contexts[:5] if contexts else []
+        with st.expander("📄 View Context (top 5)", expanded=False):
+            if not top_contexts:
+                st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
+            else:
+                for c in top_contexts:
+                    title = extract_clean_title(c["file_name"])
+                    pdf_url = create_direct_link(c["file_name"])
+                    snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
+                    st.markdown(f"- **{title}** ({pdf_url})\n  {snippet}")
+                    st.divider()
 
 # STREAMLIT UI LOGIC
 with st.sidebar:
@@ -458,18 +461,17 @@ with st.sidebar:
                 st.session_state.messages.append({"role": "user", "content": question})
                 st.session_state.has_queried = True
                 run_query(question)
-                st.rerun()
     else:
         for suggestion in st.session_state.follow_up_suggestions:
             if st.button(suggestion, key=f"suggestion_{suggestion[:50]}"):
                 st.session_state.messages.append({"role": "user", "content": suggestion})
                 run_query(suggestion)
-                st.rerun()
 
 # Display chat history
-for msg in st.session_state.messages:
-    if msg["role"] in ["user", "assistant"]:
-        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+with st.container():
+    for msg in st.session_state.messages:
+        if msg["role"] in ["user", "assistant"]:
+            st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
 # Chat input
 user_input = st.chat_input("Ask your question about the Federal Reserve...")
@@ -477,20 +479,19 @@ if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
-    st.rerun()
 
 # Buttons below chat input
-col1, col2 = st.columns(2)
-with col1:
-    if st.button("🧹 Clear Conversation"):
-        st.session_state.messages.clear()
-        st.session_state.rag_cache.clear()
-        st.session_state.last_contexts.clear()
-        st.session_state.follow_up_suggestions = []
-        st.session_state.has_queried = False
-        st.rerun()
-with col2:
-    if st.button("📥 Download Conversation"):
+if st.session_state.messages:
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🧹 Clear Conversation"):
+            st.session_state.messages.clear()
+            st.session_state.rag_cache.clear()
+            st.session_state.last_contexts.clear()
+            st.session_state.follow_up_suggestions = []
+            st.session_state.has_queried = False
+            st.rerun()
+    with col2:
         current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EST")
         history_md = f"# Chat History - {current_time}\n\n"
         for msg in st.session_state.messages:
@@ -506,4 +507,5 @@ with col2:
             history_md += "## Sources\n\nNo documents found for the last query.\n"
         
         pdf_buffer = create_pdf(history_md)
-        st.download_button("Download Chat History as PDF", pdf_buffer, "chat_history.pdf", "application/pdf", key="download_pdf")
+        with col2:
+            st.download_button("📥 Download Chat History as PDF", pdf_buffer, "chat_history.pdf", "application/pdf", key="download_pdf")
