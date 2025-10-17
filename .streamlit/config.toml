@@ -1,0 +1,10 @@
+[theme]
+base="light"
+
+[server]
+showGithubButton = false
+showRepoLink = false
+showShareButton = false
+
+[ui]
+hideStreamlitBranding = true
