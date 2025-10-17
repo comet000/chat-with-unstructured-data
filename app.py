@@ -170,7 +170,7 @@ class CortexSearchRetriever:
             unique_docs = {}
             for r in raw_results:
                 if r["file_name"] not in unique_docs:
-                    unique_docs[r["file_name"]] = r
+                    unique_docs[r["file_name"] = r
             docs = list(unique_docs.values())
             target_years = extract_target_years(query)
             if target_years:
@@ -317,33 +317,30 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:25 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
-    styles['Normal'].fontSize = 11
-    styles['Normal'].leading = 14
+    styles['Normal'].fontSize = 10
+    styles['Normal'].leading = 12
     styles['Heading1'].fontName = 'Helvetica-Bold'
-    styles['Heading1'].fontSize = 16
-    styles['Heading1'].leading = 18
+    styles['Heading1'].fontSize = 14
+    styles['Heading1'].leading = 16
     styles['Title'].fontName = 'Helvetica-Bold'
-    styles['Title'].fontSize = 18
+    styles['Title'].fontSize = 16
     styles['Title'].textColor = colors.darkblue
     story = []
     story.append(Paragraph(f"Chat History - {current_time}", styles["Title"]))
-    story.append(Spacer(1, 18))
+    story.append(Spacer(1, 12))
     for line in history_md.split("\n"):
-        if line.startswith("# Chat History"):
-            story.append(Paragraph("Conversation History", styles["Heading1"]))
-            story.append(Spacer(1, 12))
-        elif line.startswith("#") and not line.startswith("# Chat History"):
+        if line.startswith("#") and not line.startswith("# Chat History"):
             clean_line = re.sub(r'^#+', '', line).strip()
             story.append(Paragraph(clean_line, styles["Heading1"]))
-            story.append(Spacer(1, 12))
+            story.append(Spacer(1, 6))
         elif line.startswith("**"):
             role, content = line.split("**: ", 1)
             story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
-            story.append(Spacer(1, 10))
+            story.append(Spacer(1, 6))
         elif line.startswith("- **"):
             parts = line.split("** (")
             if len(parts) > 1:
@@ -353,10 +350,10 @@ def create_pdf(history_md: str) -> BytesIO:
                 story.append(Paragraph(f"- <b>{title.strip()}</b> ({parts[0].replace('- **', '')})", styles["Normal"]))
                 if snippet:
                     story.append(Paragraph(snippet, styles["Normal"]))
-                    story.append(Spacer(1, 8))
+                    story.append(Spacer(1, 6))
         else:
             story.append(Paragraph(line, styles["Normal"]))
-            story.append(Spacer(1, 8))
+            story.append(Spacer(1, 6))
     doc.build(story)
     buffer.seek(0)
     return buffer
@@ -410,7 +407,7 @@ def run_query(user_query: str):
 st.set_page_config(
     page_title="Chat with the Federal Reserve",
     page_icon="💬",
-    layout="wide"  # Changed to 'wide' for more horizontal space
+    layout="centered"
 )
 st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
 st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
@@ -419,12 +416,6 @@ st.markdown(
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
-    .sidebar .sidebar-content {
-        width: 350px !important;
-    }
-    .main .block-container {
-        max-width: 1200px;
-    }
     </style>
     """,
     unsafe_allow_html=True
