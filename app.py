@@ -47,8 +47,6 @@ if "rag_cache" not in st.session_state:
     st.session_state.rag_cache = LRUCache(maxsize=20)
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
-if "follow_up_suggestions" not in st.session_state:
-    st.session_state.follow_up_suggestions = []
 
 # CACHE & MESSAGE MANAGEMENT HELPERS
 def cache_with_limit(cache_dict, key, value):
@@ -427,6 +425,11 @@ def run_query(user_query: str):
                 st.divider()
     # Dynamic follow-ups
     st.session_state.follow_up_suggestions = get_dynamic_follow_ups(user_query)
+    st.write("Suggested follow-ups:")
+    for suggestion in st.session_state.follow_up_suggestions:
+        if st.button(suggestion):
+            st.session_state.messages.append({"role": "user", "content": suggestion})
+            run_query(suggestion)
    
     # Log to Snowflake
     try:
@@ -463,7 +466,6 @@ if st.session_state.messages:
             st.session_state.messages.clear()
             st.session_state.rag_cache.clear()
             st.session_state.last_contexts.clear()
-            st.session_state.follow_up_suggestions = []
             st.rerun()
     with col2:
         current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EST")
@@ -482,14 +484,6 @@ if st.session_state.messages:
         
         pdf_buffer = create_pdf(history_md)
         st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
-
-# Suggested follow-ups
-if st.session_state.follow_up_suggestions:
-    st.write("Suggested follow-ups:")
-    for suggestion in st.session_state.follow_up_suggestions:
-        if st.button(suggestion):
-            st.session_state.messages.append({"role": "user", "content": suggestion})
-            run_query(suggestion)
 
 # Example questions in sidebar
 st.sidebar.header("Example Questions")
