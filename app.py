@@ -40,7 +40,6 @@ def get_recent_conversation_context(messages, max_pairs=2):
 @st.cache_resource
 def create_snowflake_session():
     try:
-        # Use flat secrets as provided in Streamlit Cloud
         connection_parameters = {
             "account": st.secrets["account"],
             "user": st.secrets["user"],
@@ -52,7 +51,6 @@ def create_snowflake_session():
         }
     except (KeyError, TypeError) as e:
         logging.error(f"Failed to load secrets from Streamlit: {e}")
-        # Fallback to environment variables
         connection_parameters = {
             "account": os.getenv("SNOWFLAKE_ACCOUNT", "fokiamm-yqb60913"),
             "user": os.getenv("SNOWFLAKE_USER", "streamlit_demo_user"),
@@ -202,7 +200,6 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
     """
     Build an optimized system prompt with limited context size and inference encouragement.
     """
-    # Group contexts by year (limit to top 5 to reduce size)
     year_buckets = {}
     for c in contexts[:5]:
         year = extract_file_year(c["file_name"])
@@ -216,13 +213,9 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
    
     context_text = "\n\n".join(grouped_texts)
    
-    # Strict character limit on context
     if len(context_text) > 1500:
         context_text = context_text[:1500]
-    # Add conversation history if available
-    history_section = ""
-    if conversation_history:
-        history_section = f"\n\nRecent conversation:\n{conversation_history}\n"
+    history_section = f"\n\nRecent conversation:\n{conversation_history}\n" if conversation_history else ""
     prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
 Today is {datetime.now():%B %d, %Y}.
 {glossary}
@@ -244,12 +237,10 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
     """
     if not query:
         return []
-    # Normalize query for cache
     def normalize_query(q):
         return re.sub(r'[^\w\s]', '', q.lower()).strip()
    
     norm_query = normalize_query(query)
-    # Check cache first
     if norm_query in st.session_state.rag_cache:
         return st.session_state.rag_cache[norm_query]
     def _call():
@@ -267,7 +258,6 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         except Exception as e:
             logging.error(f"Retrieval error (attempt {attempt+1}/{retries+1}): {e}")
             time.sleep(1)
-    # Fallback to cached result if available
     fallback = st.session_state.rag_cache.get(norm_query, [])
     if fallback:
         logging.warning("Using cached retrieval results as fallback.")
@@ -290,7 +280,6 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
             st.warning("Response took too long. Trying faster model...")
             try:
-                # Fallback to faster model with fewer contexts
                 prompt = build_system_prompt(query, contexts[:3], "")
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
@@ -299,7 +288,6 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
-    # Final fallback
     try:
         logging.warning("Falling back to non-streaming completion.")
         prompt = build_system_prompt(query, contexts[:3], "")
@@ -329,7 +317,7 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 01:27 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 01:50 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
@@ -377,15 +365,13 @@ def run_query(user_query: str):
     start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
    
-    # Retrieve context
     with st.spinner("Searching documents..."):
         contexts = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
     retrieval_time = time.time() - start_time
     if not contexts:
         st.info("No relevant context found. Answering from general knowledge.")
-    # Store contexts for export
     st.session_state.last_contexts = contexts[:5]
-    # Generate response
+   
     with st.spinner("Generating response..."):
         stream = generate_response_stream(user_query, contexts, conversation_history)
    
@@ -401,10 +387,9 @@ def run_query(user_query: str):
             logging.exception("Error while streaming chunk")
     generation_time = time.time() - start_time - retrieval_time
     st.session_state.messages.append({"role": "assistant", "content": response_text})
-    # Limit message history
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
-    # Show context sources
+   
     top_contexts = contexts[:5] if contexts else []
     with st.expander("📄 View Context (top 5)", expanded=False):
         if not top_contexts:
@@ -418,18 +403,10 @@ def run_query(user_query: str):
                 st.caption(snippet)
                 st.divider()
 
-    # Force sidebar refresh
-    st.sidebar.empty()
-
 # INITIAL SETUP
-st.set_page_config(
-    page_title="Chat with the Federal Reserve",
-    page_icon="💬",
-    layout="centered"
-)
+st.set_page_config(layout="wide", page_title="Chat with the Federal Reserve", page_icon="💬")
 st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
 st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
-# Hide Streamlit default menu and footer for cleaner UI
 st.markdown(
     """
     <style>
@@ -439,7 +416,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-# Initialize session state keys
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "rag_cache" not in st.session_state:
@@ -448,57 +424,59 @@ if "rag_cache" not in st.session_state:
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
 
-# STREAMLIT UI LOGIC
-# Display chat history
-for msg in st.session_state.messages:
-    if msg["role"] in ["user", "assistant"]:
-        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+# COLUMN LAYOUT
+left_col, main_col, right_col = st.columns([1, 3, 1])
 
-# Chat input
-user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
-if user_input:
-    st.chat_message("user", avatar="👤").write(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    run_query(user_input)
+with left_col:
+    st.header("Example Questions")
+    example_questions = [
+        "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
+        "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
+        "Are businesses still struggling with costs?",
+        "What's the median rate projection for next year?",
+        "What's the Fed's plan going forward?",
+        "To what extent do tariff policy and trade disruptions factor into your inflation outlook and decision-making?",
+        "When and how fast should the Fed cut rates (if at all)?",
+        "How exposed is the financial system to a shift in sentiment or asset revaluation?",
+        "Are supply chain issues still showing up regionally?",
+        "How did the FOMC view the economic outlook in mid-2023?",
+        "What were the key points discussed in the FOMC meeting in January 2023?",
+        "How did the FOMC assess the labor market in mid-2024?",
+        "What was the fed funds rate target range effective September 19, 2024?",
+    ]
+    for question in example_questions:
+        if st.button(question, key=f"example_{question[:50]}"):
+            st.session_state.messages.append({"role": "user", "content": question})
+            run_query(question)
 
-# Sidebar for controls
-st.sidebar.header("Conversation Tools")
-st.sidebar.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
-if st.session_state.messages:
-    history_md = "\n".join([
-        "# Chat History",
-        *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
-        *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
-        *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
-    ])
-    st.sidebar.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
-    last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
-    follow_ups = get_dynamic_follow_ups(last_response)
-    st.sidebar.write("Suggested Follow-ups:")
-    for suggestion in follow_ups:
-        if st.sidebar.button(suggestion):
-            st.chat_message("user", avatar="👤").write(suggestion)
-            st.session_state.messages.append({"role": "user", "content": suggestion})
-            run_query(suggestion)
+with main_col:
+    # Display chat history
+    for msg in st.session_state.messages:
+        if msg["role"] in ["user", "assistant"]:
+            st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+    
+    # Chat input
+    user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
+    if user_input:
+        st.chat_message("user", avatar="👤").write(user_input)
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        run_query(user_input)
 
-st.sidebar.header("Example Questions")
-example_questions = [
-    "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
-    "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
-    "Are businesses still struggling with costs?",
-    "What's the median rate projection for next year?",
-    "What's the Fed's plan going forward?",
-    "To what extent do tariff policy and trade disruptions factor into your inflation outlook and decision-making?",
-    "When and how fast should the Fed cut rates (if at all)?",
-    "How exposed is the financial system to a shift in sentiment or asset revaluation?",
-    "Are supply chain issues still showing up regionally?",
-    "How did the FOMC view the economic outlook in mid-2023?",
-    "What were the key points discussed in the FOMC meeting in January 2023?",
-    "How did the FOMC assess the labor market in mid-2024?",
-    "What was the fed funds rate target range effective September 19, 2024?",
-]
-for question in example_questions:
-    if st.sidebar.button(question, key=f"example_{question[:50]}"):
-        st.chat_message("user", avatar="👤").write(question)
-        st.session_state.messages.append({"role": "user", "content": question})
-        run_query(question)
+with right_col:
+    st.header("Conversation Tools")
+    st.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
+    if st.session_state.messages:
+        history_md = "\n".join([
+            "# Chat History",
+            *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
+            *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
+            *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
+        ])
+        st.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
+        last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
+        follow_ups = get_dynamic_follow_ups(last_response)
+        st.write("Suggested Follow-ups:")
+        for suggestion in follow_ups:
+            if st.button(suggestion):
+                st.session_state.messages.append({"role": "user", "content": suggestion})
+                run_query(suggestion)
