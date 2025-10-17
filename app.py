@@ -310,7 +310,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT") # October 17, 2025 03:36 PM EDT
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT") # October 17, 2025 03:40 PM EDT
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
@@ -329,10 +329,11 @@ def create_pdf(history_md: str) -> BytesIO:
             parts = line.split(" (")
             if len(parts) > 1:
                 title_date = parts[1].rstrip(")")
+                link_part = parts[0][2:]
                 story.append(Paragraph(title_date, styles["Normal"]))
-                story.append(Paragraph(parts[0][2:], styles["Normal"]))
+                story.append(Paragraph(link_part, styles["Normal"]))
             story.append(Spacer(1, 6))
-        elif line:
+        elif line and ":" in line:
             role, content = line.split(": ", 1)
             story.append(Paragraph(f"{role}: {content}", styles["Normal"]))
             story.append(Spacer(1, 6))
