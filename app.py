@@ -6,6 +6,7 @@ import time
 import os
 from typing import List
 from datetime import datetime
+from zoneinfo import ZoneInfo  # FIX: Import ZoneInfo for timezone-aware datetimes
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from snowflake.cortex import complete
@@ -13,6 +14,7 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
+from cachetools import LRUCache
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -38,7 +40,6 @@ def get_recent_conversation_context(messages, max_pairs=2):
 @st.cache_resource
 def create_snowflake_session():
     try:
-        # Use flat secrets as provided in Streamlit Cloud
         connection_parameters = {
             "account": st.secrets["account"],
             "user": st.secrets["user"],
@@ -50,7 +51,6 @@ def create_snowflake_session():
         }
     except (KeyError, TypeError) as e:
         logging.error(f"Failed to load secrets from Streamlit: {e}")
-        # Fallback to environment variables
         connection_parameters = {
             "account": os.getenv("SNOWFLAKE_ACCOUNT", "fokiamm-yqb60913"),
             "user": os.getenv("SNOWFLAKE_USER", "streamlit_demo_user"),
@@ -200,7 +200,6 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
     """
     Build an optimized system prompt with limited context size and inference encouragement.
     """
-    # Group contexts by year (limit to top 5 to reduce size)
     year_buckets = {}
     for c in contexts[:5]:
         year = extract_file_year(c["file_name"])
@@ -214,13 +213,13 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
    
     context_text = "\n\n".join(grouped_texts)
    
-    # Strict character limit on context
     if len(context_text) > 1500:
         context_text = context_text[:1500]
-    # Add conversation history if available
+    
     history_section = ""
     if conversation_history:
         history_section = f"\n\nRecent conversation:\n{conversation_history}\n"
+        
     prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
 Today is {datetime.now():%B %d, %Y}.
 {glossary}
@@ -242,16 +241,18 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
     """
     if not query:
         return []
-    # Normalize query for cache
+        
     def normalize_query(q):
         return re.sub(r'[^\w\s]', '', q.lower()).strip()
    
     norm_query = normalize_query(query)
-    # Check cache first
+    
     if norm_query in st.session_state.rag_cache:
         return st.session_state.rag_cache[norm_query]
+        
     def _call():
         return rag_retriever.retrieve(query)
+        
     for attempt in range(retries + 1):
         try:
             with concurrent.futures.ThreadPoolExecutor() as executor:
@@ -265,7 +266,7 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         except Exception as e:
             logging.error(f"Retrieval error (attempt {attempt+1}/{retries+1}): {e}")
             time.sleep(1)
-    # Fallback to cached result if available
+            
     fallback = st.session_state.rag_cache.get(norm_query, [])
     if fallback:
         logging.warning("Using cached retrieval results as fallback.")
@@ -278,6 +279,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     prompt = build_system_prompt(query, contexts, conversation_history)
     def run_completion(model_to_use):
         return complete(model_to_use, prompt, stream=True, session=session)
+        
     max_retries = 2
     for attempt in range(max_retries + 1):
         try:
@@ -288,7 +290,6 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
             st.warning("Response took too long. Trying faster model...")
             try:
-                # Fallback to faster model with fewer contexts
                 prompt = build_system_prompt(query, contexts[:3], "")
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
@@ -297,7 +298,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
-    # Final fallback
+            
     try:
         logging.warning("Falling back to non-streaming completion.")
         prompt = build_system_prompt(query, contexts[:3], "")
@@ -334,18 +335,12 @@ def create_pdf(history_md: str) -> BytesIO:
         if line.startswith("#"):
             story.append(Paragraph(line.lstrip("# "), styles["Title"]))
         elif line.startswith("**"):
-            # Remove "Link" text from URLs in PDF
-            clean_line = re.sub(r'\(Link\)\s*', '', line)
-            role, content = clean_line.split("**: ", 1)
+            role, content = line.split("**: ", 1)
             story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
         elif line.startswith("- **"):
-            # Remove "Link" text from URLs in PDF
-            clean_line = re.sub(r'\(Link\)\s*', '', line)
-            story.append(Paragraph(clean_line, styles["Normal"]))
+            story.append(Paragraph(line, styles["Normal"]))
         else:
-            # Remove "Link" text from URLs in PDF
-            clean_line = re.sub(r'\(Link\)\s*', '', line)
-            story.append(Paragraph(clean_line, styles["Normal"]))
+            story.append(Paragraph(line, styles["Normal"]))
         story.append(Spacer(1, 12))
     doc.build(story)
     buffer.seek(0)
@@ -358,15 +353,14 @@ def run_query(user_query: str):
     start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
    
-    # Retrieve context
     with st.spinner("Searching documents..."):
         contexts = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
     retrieval_time = time.time() - start_time
     if not contexts:
         st.info("No relevant context found. Answering from general knowledge.")
-    # Store contexts for export
+        
     st.session_state.last_contexts = contexts[:5]
-    # Generate response
+    
     with st.spinner("Generating response..."):
         stream = generate_response_stream(user_query, contexts, conversation_history)
    
@@ -380,12 +374,13 @@ def run_query(user_query: str):
             placeholder.markdown(response_text, unsafe_allow_html=False)
         except Exception:
             logging.exception("Error while streaming chunk")
+            
     generation_time = time.time() - start_time - retrieval_time
     st.session_state.messages.append({"role": "assistant", "content": response_text})
-    # Limit message history
+    
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
-    # Show context sources
+        
     top_contexts = contexts[:5] if contexts else []
     with st.expander("📄 View Context (top 5)", expanded=False):
         if not top_contexts:
@@ -399,7 +394,6 @@ def run_query(user_query: str):
                 st.caption(snippet)
                 st.divider()
    
-    # Log to Snowflake
     try:
         context_size = sum(len(c["chunk"]) for c in contexts)
         session.sql(f"""
@@ -421,7 +415,6 @@ st.set_page_config(
 )
 st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
 st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
-# Hide Streamlit default menu and footer for cleaner UI
 st.markdown(
     """
     <style>
@@ -431,76 +424,78 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-# Initialize session state keys
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "rag_cache" not in st.session_state:
-    from cachetools import LRUCache
     st.session_state.rag_cache = LRUCache(maxsize=20)
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
-if "show_controls" not in st.session_state:
-    st.session_state.show_controls = False
 
 # STREAMLIT UI LOGIC
-# Display chat history
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
-        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+        avatar = "👤" if msg["role"] == "user" else "🤖"
+        st.chat_message(msg["role"], avatar=avatar).markdown(msg["content"], unsafe_allow_html=False)
 
-# Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
-
-# Show controls after first assistant response
-if st.session_state.messages and any(msg["role"] == "assistant" for msg in st.session_state.messages):
-    st.session_state.show_controls = True
-
-# Always show buttons below chat input if there are any messages
-if st.session_state.messages:
-    # Create buttons in columns
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🧹 Clear Conversation"):
-            st.session_state.messages.clear()
-            st.session_state.rag_cache.clear()
-            st.session_state.last_contexts.clear()
-            st.session_state.show_controls = False
-            st.rerun()
-    with col2:
-        # Use actual current time for timestamp
-        current_time = datetime.now().strftime("%B %d, %Y at %H:%M:%S")
-        history_md = f"# Chat History - {current_time}\n\n"
-        for msg in st.session_state.messages:
-            history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
-        if st.session_state.last_contexts:
-            history_md += "## Sources Used in Last Response\n\n"
-            for c in st.session_state.last_contexts:
-                title = extract_clean_title(c["file_name"])
-                pdf_url = create_direct_link(c["file_name"])
-                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                # Remove "Link" text from PDF export
-                history_md += f"- **{title}** ({pdf_url})\n {snippet}\n\n"
-        else:
-            history_md += "## Sources\n\nNo documents found for the last query.\n"
-        
-        pdf_buffer = create_pdf(history_md)
-        st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
-
-# Dynamic follow-ups - show after each assistant response
-if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
-    last_response = st.session_state.messages[-1]["content"]
-    follow_ups = get_dynamic_follow_ups(last_response)
-    st.write("Suggested follow-ups:")
-    for suggestion in follow_ups:
-        if st.button(suggestion, key=f"followup_{suggestion[:20]}"):
-            st.chat_message("user", avatar="👤").write(suggestion)
-            st.session_state.messages.append({"role": "user", "content": suggestion})
-            run_query(suggestion)
-
 if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
+    st.rerun() # FIX: Forces the script to rerun, making the buttons and follow-ups appear immediately.
+
+# Display controls only after the first message has been sent.
+if st.session_state.messages:
+    st.write("---")
+    controls_container = st.container()
+    with controls_container:
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🧹 Clear Conversation"):
+                st.session_state.messages.clear()
+                st.session_state.rag_cache.clear()
+                st.session_state.last_contexts.clear()
+                st.rerun()
+        with col2:
+            try:
+                # FIX: Use a timezone-aware timestamp for better accuracy.
+                ny_tz = ZoneInfo("America/New_York")
+                current_time_ny = datetime.now(ny_tz)
+                current_time_str = current_time_ny.strftime("%B %d, %Y %I:%M %p %Z")
+            except Exception:
+                # Fallback if zoneinfo is unavailable
+                current_time_str = datetime.now().strftime("%B %d, %Y %H:%M")
+
+            history_md = f"# Chat History - {current_time_str}\n\n"
+            for msg in st.session_state.messages:
+                history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
+            
+            if st.session_state.last_contexts:
+                history_md += "## Sources Used in Last Response\n\n"
+                for c in st.session_state.last_contexts:
+                    title = extract_clean_title(c["file_name"])
+                    pdf_url = create_direct_link(c["file_name"])
+                    snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
+                    # FIX: Removed the "[Link]()" markdown which rendered as plain text.
+                    history_md += f"- **{title}**: {pdf_url}\n {snippet}\n\n"
+            else:
+                history_md += "## Sources\n\nNo documents found for the last query.\n"
+            
+            pdf_buffer = create_pdf(history_md)
+            st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
+
+    # Dynamic follow-ups appear below the action buttons
+    last_assistant_message = next((msg for msg in reversed(st.session_state.messages) if msg["role"] == "assistant"), None)
+    if last_assistant_message:
+        follow_ups = get_dynamic_follow_ups(last_assistant_message['content'])
+        st.write("💡 **Suggested follow-ups:**")
+        
+        cols = st.columns(len(follow_ups))
+        for i, suggestion in enumerate(follow_ups):
+            if cols[i].button(suggestion, use_container_width=True):
+                st.session_state.messages.append({"role": "user", "content": suggestion})
+                st.rerun()
 
 # Example questions in sidebar
 st.sidebar.header("Example Questions")
@@ -519,8 +514,13 @@ example_questions = [
     "How did the FOMC assess the labor market in mid-2024?",
     "What was the fed funds rate target range effective September 19, 2024?",
 ]
+
+# FIX: Refactored sidebar logic to avoid running a query directly inside it.
+# Instead, we set the user input and rerun the script.
+if "user_input" not in st.session_state:
+    st.session_state.user_input = ""
+
 for question in example_questions:
     if st.sidebar.button(question, key=f"example_{question[:50]}"):
-        st.chat_message("user", avatar="👤").write(question)
         st.session_state.messages.append({"role": "user", "content": question})
-        run_query(question)
+        st.rerun()
