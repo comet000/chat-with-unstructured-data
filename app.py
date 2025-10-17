@@ -317,30 +317,33 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:41 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
-    styles['Normal'].fontSize = 10
-    styles['Normal'].leading = 12
+    styles['Normal'].fontSize = 11
+    styles['Normal'].leading = 14
     styles['Heading1'].fontName = 'Helvetica-Bold'
-    styles['Heading1'].fontSize = 14
-    styles['Heading1'].leading = 16
+    styles['Heading1'].fontSize = 16
+    styles['Heading1'].leading = 18
     styles['Title'].fontName = 'Helvetica-Bold'
-    styles['Title'].fontSize = 16
+    styles['Title'].fontSize = 18
     styles['Title'].textColor = colors.darkblue
     story = []
     story.append(Paragraph(f"Chat History - {current_time}", styles["Title"]))
-    story.append(Spacer(1, 12))
+    story.append(Spacer(1, 18))
     for line in history_md.split("\n"):
-        if line.startswith("#") and not line.startswith("# Chat History"):
+        if line.startswith("# Chat History"):
+            story.append(Paragraph("Conversation History", styles["Heading1"]))
+            story.append(Spacer(1, 12))
+        elif line.startswith("#"):
             clean_line = re.sub(r'^#+', '', line).strip()
             story.append(Paragraph(clean_line, styles["Heading1"]))
-            story.append(Spacer(1, 6))
+            story.append(Spacer(1, 12))
         elif line.startswith("**"):
             role, content = line.split("**: ", 1)
             story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
-            story.append(Spacer(1, 6))
+            story.append(Spacer(1, 10))
         elif line.startswith("- **"):
             parts = line.split("** (")
             if len(parts) > 1:
@@ -350,10 +353,10 @@ def create_pdf(history_md: str) -> BytesIO:
                 story.append(Paragraph(f"- <b>{title.strip()}</b> ({parts[0].replace('- **', '')})", styles["Normal"]))
                 if snippet:
                     story.append(Paragraph(snippet, styles["Normal"]))
-                    story.append(Spacer(1, 6))
+                    story.append(Spacer(1, 8))
         else:
             story.append(Paragraph(line, styles["Normal"]))
-            story.append(Spacer(1, 6))
+            story.append(Spacer(1, 8))
     doc.build(story)
     buffer.seek(0)
     return buffer
@@ -402,12 +405,33 @@ def run_query(user_query: str):
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
+   
+    follow_ups = get_dynamic_follow_ups(response_text)
+    st.write("Suggested follow-ups:")
+    for suggestion in follow_ups:
+        if st.button(suggestion):
+            st.chat_message("user", avatar="👤").write(suggestion)
+            st.session_state.messages.append({"role": "user", "content": suggestion})
+            run_query(suggestion)
+   
+    try:
+        context_size = sum(len(c["chunk"]) for c in contexts)
+        session.sql(f"""
+            INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
+                query, response, num_contexts, context_size, retrieval_time, generation_time, timestamp
+            ) VALUES (
+                '{user_query.replace("'", "''")}', '{response_text.replace("'", "''")}',
+                {len(contexts)}, {context_size}, {retrieval_time}, {generation_time}, CURRENT_TIMESTAMP()
+            )
+        """).collect()
+    except Exception as e:
+        logging.error(f"Logging failed: {e}")
 
 # INITIAL SETUP
 st.set_page_config(
     page_title="Chat with the Federal Reserve",
     page_icon="💬",
-    layout="centered"
+    layout="wide"
 )
 st.title("💬 Chat with the Federal Reserve - Enhanced Conversational Mode")
 st.markdown("**Supports multi-document reasoning, trend analysis, and Fed jargon explanation.**")
@@ -416,6 +440,12 @@ st.markdown(
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+    .sidebar .sidebar-content {
+        width: 350px !important;
+    }
+    .main .block-container {
+        max-width: 1200px;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -440,15 +470,6 @@ with st.sidebar:
                 *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
             ])
             st.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
-            last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
-            follow_ups = get_dynamic_follow_ups(last_response)
-            st.write("Suggested Follow-ups:")
-            for suggestion in follow_ups:
-                if st.button(suggestion):
-                    st.chat_message("user", avatar="👤").write(suggestion)
-                    st.session_state.messages.append({"role": "user", "content": suggestion})
-                    run_query(suggestion)
-
     with st.expander("Example Questions", expanded=False):
         example_questions = [
             "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
