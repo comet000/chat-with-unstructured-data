@@ -119,7 +119,7 @@ try:
     search_service = (
         root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
         .schemas["PUBLIC"]
-        .cortex_search_service["FOMC_SEARCH_SERVICE"]
+        .cortex_search_services["FOMC_SEARCH_SERVICE"]
     )
 except Exception as e:
     st.error("Failed to initialize Snowflake connection.")
@@ -156,7 +156,7 @@ def extract_clean_title(file_name: str) -> str:
         doc_type = "Beige Book"
     elif "longerungoals" in fname or "fomc_longerungoals" in fname:
         doc_type = "FOMC Longer-Run Goals"
-    elif "presconf" in fname or "fomcpressconf" in fname:
+    elif "presconf" in fname or "fomcpresconf" in fname:
         doc_type = "Press Conference"
     elif "projtabl" in fname or "fomcprojtabl" in fname:
         doc_type = "Projection Tables"
@@ -218,8 +218,8 @@ class CortexSearchRetriever:
 
             target_years = extract_target_years(query)
             if target_years:
-                lower_year = min(target_years) - 1
-                upper_year = max(target_years) + 2
+                lower_year = min(target_years) - 1  # Include adjacent years
+                upper_year = max(target_years) + 1
                 filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
                 if filtered_docs:
                     docs = filtered_docs
@@ -343,7 +343,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
-                return iter(["Limited information in the provided documents. Here is a partial answer based on available data..."])
+                return iter(["Limited information available. Here's a partial answer based on available data:"])
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
