@@ -328,7 +328,7 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 12:34 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
@@ -403,32 +403,19 @@ def run_query(user_query: str):
                 st.caption(snippet)
                 st.divider()
    
-    # Create APP_LOGS table if it doesn't exist
-    session.sql("""
-        CREATE TABLE IF NOT EXISTS CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
-            query STRING,
-            response STRING,
-            num_contexts INTEGER,
-            context_size INTEGER,
-            retrieval_time FLOAT,
-            generation_time FLOAT,
-            timestamp TIMESTAMP
-        )
-    """).collect()
-   
-    # Log to Snowflake
-    try:
-        context_size = sum(len(c["chunk"]) for c in contexts)
-        session.sql(f"""
-            INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
-                query, response, num_contexts, context_size, retrieval_time, generation_time, timestamp
-            ) VALUES (
-                '{user_query.replace("'", "''")}', '{response_text.replace("'", "''")}',
-                {len(contexts)}, {context_size}, {retrieval_time}, {generation_time}, CURRENT_TIMESTAMP()
-            )
-        """).collect()
-    except Exception as e:
-        logging.error(f"Logging failed: {e}")
+    # Log to Snowflake (commented out due to privilege error)
+    # try:
+    #     context_size = sum(len(c["chunk"]) for c in contexts)
+    #     session.sql(f"""
+    #         INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
+    #             query, response, num_contexts, context_size, retrieval_time, generation_time, timestamp
+    #         ) VALUES (
+    #             '{user_query.replace("'", "''")}', '{response_text.replace("'", "''")}',
+    #             {len(contexts)}, {context_size}, {retrieval_time}, {generation_time}, CURRENT_TIMESTAMP()
+    #         )
+    #     """).collect()
+    # except Exception as e:
+    #     logging.error(f"Logging failed: {e}")
 
     # Render buttons and follow-ups after each response
     col1, col2 = st.columns(2)
