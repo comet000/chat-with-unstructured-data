@@ -393,12 +393,13 @@ st.set_page_config(
     page_icon="💬",
     layout="centered"
 )
-st.title("🏦 Chat with the Federal Reserve")
-
 st.markdown(
     """
-    <div style='text-align: right; font-weight: bold;'>
-        5,000 pages of Fed insights at your fingertips (2023 - 2025)
+    <div style='display: inline-block; text-align: right;'>
+        <h1>🏦 Chat with the Federal Reserve</h1>
+        <div style='font-weight: bold; font-size: 18px;'>
+            5,000 pages of Fed insights at your fingertips (2023 - 2025)
+        </div>
     </div>
     """,
     unsafe_allow_html=True
