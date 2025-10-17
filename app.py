@@ -13,6 +13,7 @@ from snowflake.cortex import complete
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
 from io import BytesIO
 
 # Setup logging
@@ -328,29 +329,43 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 12:34 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 12:53 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
+    styles['Normal'].fontName = 'Helvetica'
+    styles['Normal'].fontSize = 10
+    styles['Normal'].leading = 12
+    styles['Heading1'].fontName = 'Helvetica-Bold'
+    styles['Heading1'].fontSize = 14
+    styles['Heading1'].leading = 16
+    styles['Title'].fontName = 'Helvetica-Bold'
+    styles['Title'].fontSize = 16
+    styles['Title'].textColor = colors.darkblue
     story = []
-    story.append(Paragraph(f"# Chat History - {current_time}", styles["Title"]))
+    story.append(Paragraph(f"Chat History - {current_time}", styles["Title"]))
+    story.append(Spacer(1, 12))
     for line in history_md.split("\n"):
         if line.startswith("#") and not line.startswith("# Chat History"):
-            story.append(Paragraph(line.lstrip("# "), styles["Heading1"]))
+            clean_line = re.sub(r'^#+', '', line).strip()
+            story.append(Paragraph(clean_line, styles["Heading1"]))
+            story.append(Spacer(1, 6))
         elif line.startswith("**"):
             role, content = line.split("**: ", 1)
             story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
+            story.append(Spacer(1, 6))
         elif line.startswith("- **"):
             parts = line.split("** (")
             if len(parts) > 1:
                 title = parts[1].split(")", 1)[0]
                 rest = parts[1].split(")", 1)[1] if len(parts[1].split(")", 1)) > 1 else ""
                 snippet = rest.strip() if rest and "\n" in rest else ""
-                story.append(Paragraph(f"- **{title.strip()}** ({parts[0].replace('- **', '')})", styles["Normal"]))
+                story.append(Paragraph(f"- <b>{title.strip()}</b> ({parts[0].replace('- **', '')})", styles["Normal"]))
                 if snippet:
                     story.append(Paragraph(snippet, styles["Normal"]))
+                    story.append(Spacer(1, 6))
         else:
             story.append(Paragraph(line, styles["Normal"]))
-        story.append(Spacer(1, 12))
+            story.append(Spacer(1, 6))
     doc.build(story)
     buffer.seek(0)
     return buffer
@@ -402,47 +417,6 @@ def run_query(user_query: str):
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
-   
-    # Log to Snowflake (commented out due to privilege error)
-    # try:
-    #     context_size = sum(len(c["chunk"]) for c in contexts)
-    #     session.sql(f"""
-    #         INSERT INTO CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.APP_LOGS (
-    #             query, response, num_contexts, context_size, retrieval_time, generation_time, timestamp
-    #         ) VALUES (
-    #             '{user_query.replace("'", "''")}', '{response_text.replace("'", "''")}',
-    #             {len(contexts)}, {context_size}, {retrieval_time}, {generation_time}, CURRENT_TIMESTAMP()
-    #         )
-    #     """).collect()
-    # except Exception as e:
-    #     logging.error(f"Logging failed: {e}")
-
-    # Render buttons and follow-ups after each response
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🧹 Clear Conversation"):
-            st.session_state.messages.clear()
-            st.session_state.rag_cache.clear()
-            st.session_state.last_contexts.clear()
-            st.rerun()
-    with col2:
-        history_md = "\n".join([
-            "# Chat History",
-            *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
-            *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
-            *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
-        ])
-        pdf_buffer = create_pdf(history_md)
-        st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
-
-    last_response = response_text
-    follow_ups = get_dynamic_follow_ups(last_response)
-    st.write("Suggested follow-ups:")
-    for suggestion in follow_ups:
-        if st.button(suggestion):
-            st.chat_message("user", avatar="👤").write(suggestion)
-            st.session_state.messages.append({"role": "user", "content": suggestion})
-            run_query(suggestion)
 
 # INITIAL SETUP
 st.set_page_config(
@@ -483,6 +457,31 @@ if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
+
+# Sidebar for controls and follow-ups
+st.sidebar.header("Conversation Tools")
+if st.sidebar.button("🧹 Clear Conversation"):
+    st.session_state.messages.clear()
+    st.session_state.rag_cache.clear()
+    st.session_state.last_contexts.clear()
+    st.rerun()
+if st.session_state.messages:
+    history_md = "\n".join([
+        "# Chat History",
+        *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
+        *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
+        *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
+    ])
+    st.sidebar.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
+if st.session_state.messages:
+    last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
+    follow_ups = get_dynamic_follow_ups(last_response)
+    st.sidebar.write("Suggested Follow-ups:")
+    for suggestion in follow_ups:
+        if st.sidebar.button(suggestion):
+            st.chat_message("user", avatar="👤").write(suggestion)
+            st.session_state.messages.append({"role": "user", "content": suggestion})
+            run_query(suggestion)
 
 # Example questions in sidebar
 st.sidebar.header("Example Questions")
