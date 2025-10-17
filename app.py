@@ -483,3 +483,4 @@ for question in example_questions:
         # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
+
