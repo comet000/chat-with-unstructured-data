@@ -415,19 +415,20 @@ with st.sidebar:
         ]
         for question in example_questions:
             if st.button(question, key=f"example_{question[:50]}"):
-                st.chat_message("user", avatar="👤").write(question)
                 st.session_state.messages.append({"role": "user", "content": question})
-                run_query(question)
+                st.rerun()  # Rerun to update the main chat area
 
 if st.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
     st.session_state.rag_cache.clear()
     st.session_state.last_contexts.clear()
     st.rerun()
-# Display chat history
+# Display chat history and handle example question responses
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+if st.session_state.messages and st.session_state.messages[-1]["role"] == "user" and not any(msg["role"] == "assistant" for msg in st.session_state.messages[-5:]):
+    run_query(st.session_state.messages[-1]["content"])
 # Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
 if user_input:
