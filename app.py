@@ -198,7 +198,7 @@ def create_direct_link(file_name: str) -> str:
 
 # RETRIEVER CLASS
 class CortexSearchRetriever:
-    def __init__(self, snowpark_session: Session, limit: int = 20):  # Increased limit to 20
+    def __init__(self, snowpark_session: Session, limit: int = 20):
         self._root = Root(snowpark_session)
         self._service = search_service
         self.limit = limit
@@ -218,7 +218,7 @@ class CortexSearchRetriever:
 
             target_years = extract_target_years(query)
             if target_years:
-                lower_year = min(target_years) - 1  # Adjusted to include adjacent years
+                lower_year = min(target_years) - 1  # Include adjacent year for better coverage
                 upper_year = max(target_years) + 1
                 filtered_docs = [d for d in docs if lower_year <= extract_file_year(d["file_name"]) <= upper_year]
                 if filtered_docs:
@@ -266,14 +266,15 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
     if conversation_history:
         history_section = f"\n\nRecent conversation:\n{conversation_history}\n"
 
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EST")
     prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
 
-Today is {datetime.now(ZoneInfo("America/New_York")).strftime('%B %d, %Y %I:%M %p EST')}.
+Today is {current_time}.
 
 {glossary}
 
-Use the following excerpts from FOMC documents (covering 2023–2025) to answer the user's question. Do not invent facts. When relevant, cite the document type and year with specific dates (e.g., 'According to the FOMC Minutes - December 18, 2024...').
-For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., 'Based on 2025 data and assuming 2023-2024 trends continue...'). If limited context, synthesize based on available data; cite specific dates when available.
+Use the following excerpts from FOMC documents (covering 2023–2025) to answer the user's question. Do not invent facts. When relevant, cite the document type and year with specific dates (e.g., "According to the FOMC Minutes - December 18, 2024...").
+For questions spanning multiple years, synthesize trends across available years, extrapolating from adjacent years if exact data is missing (e.g., "Based on 2025 data and assuming 2023-2024 trends continue..."). If limited context, synthesize based on available data; cite specific dates when available.
 If insufficient, provide a partial answer based on available data.
 
 Context excerpts by year:
@@ -405,16 +406,15 @@ def run_query(user_query: str):
         stream = generate_response_stream(user_query, contexts, conversation_history)
     
     response_text = ""
-    with st.container():
-        assistant_container = st.chat_message("assistant", avatar="🤖")
-        placeholder = assistant_container.empty()
-        
-        for token in stream:
-            try:
-                response_text += token
-                placeholder.markdown(response_text, unsafe_allow_html=False)
-            except Exception:
-                logging.exception("Error while streaming chunk")
+    assistant_container = st.chat_message("assistant", avatar="🤖")
+    placeholder = assistant_container.empty()
+    
+    for token in stream:
+        try:
+            response_text += token
+            placeholder.markdown(response_text, unsafe_allow_html=False)
+        except Exception:
+            logging.exception("Error while streaming chunk")
 
     st.session_state.messages.append({"role": "assistant", "content": response_text})
     st.session_state.has_queried = True
@@ -424,18 +424,17 @@ def run_query(user_query: str):
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
 
-    with st.container():
-        top_contexts = contexts[:5] if contexts else []
-        with st.expander("📄 View Context (top 5)", expanded=False):
-            if not top_contexts:
-                st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
-            else:
-                for c in top_contexts:
-                    title = extract_clean_title(c["file_name"])
-                    pdf_url = create_direct_link(c["file_name"])
-                    snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                    st.markdown(f"- **{title}** ({pdf_url})\n  {snippet}")
-                    st.divider()
+    top_contexts = contexts[:5] if contexts else []
+    with st.expander("📄 View Context (top 5)", expanded=False):
+        if not top_contexts:
+            st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
+        else:
+            for c in top_contexts:
+                title = extract_clean_title(c["file_name"])
+                pdf_url = create_direct_link(c["file_name"])
+                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
+                st.markdown(f"- **{title}** ({pdf_url})\n  {snippet}")
+                st.divider()
 
 # STREAMLIT UI LOGIC
 with st.sidebar:
@@ -452,60 +451,4 @@ with st.sidebar:
             "How exposed is the financial system to a shift in sentiment or asset revaluation?",
             "Are supply chain issues still showing up regionally?",
             "How did the FOMC view the economic outlook in mid-2023?",
-            "What were the key points discussed in the FOMC meeting in January 2023?",
-            "How did the FOMC assess the labor market in mid-2024?",
-            "What was the fed funds rate target range effective September 19, 2024?",
-        ]
-        for question in example_questions:
-            if st.button(question, key=f"example_{question[:50]}"):
-                st.session_state.messages.append({"role": "user", "content": question})
-                st.session_state.has_queried = True
-                run_query(question)
-    else:
-        for suggestion in st.session_state.follow_up_suggestions:
-            if st.button(suggestion, key=f"suggestion_{suggestion[:50]}"):
-                st.session_state.messages.append({"role": "user", "content": suggestion})
-                run_query(suggestion)
-
-# Display chat history
-with st.container():
-    for msg in st.session_state.messages:
-        if msg["role"] in ["user", "assistant"]:
-            st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
-
-# Chat input
-user_input = st.chat_input("Ask your question about the Federal Reserve...")
-if user_input:
-    st.chat_message("user", avatar="👤").write(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    run_query(user_input)
-
-# Buttons below chat input
-if st.session_state.messages:
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🧹 Clear Conversation"):
-            st.session_state.messages.clear()
-            st.session_state.rag_cache.clear()
-            st.session_state.last_contexts.clear()
-            st.session_state.follow_up_suggestions = []
-            st.session_state.has_queried = False
-            st.rerun()
-    with col2:
-        current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EST")
-        history_md = f"# Chat History - {current_time}\n\n"
-        for msg in st.session_state.messages:
-            history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
-        if st.session_state.last_contexts:
-            history_md += "## Sources Used in Last Response\n\n"
-            for c in st.session_state.last_contexts:
-                title = extract_clean_title(c["file_name"])
-                pdf_url = create_direct_link(c["file_name"])
-                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                history_md += f"- **{title}** ({pdf_url})\n  {snippet}\n\n"
-        else:
-            history_md += "## Sources\n\nNo documents found for the last query.\n"
-        
-        pdf_buffer = create_pdf(history_md)
-        with col2:
-            st.download_button("📥 Download Chat History as PDF", pdf_buffer, "chat_history.pdf", "application/pdf", key="download_pdf")
+            "What were
