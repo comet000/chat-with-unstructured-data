@@ -310,7 +310,7 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT") # October 17, 2025 03:40 PM EDT
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT") # October 17, 2025 03:50 PM EDT
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
@@ -334,9 +334,13 @@ def create_pdf(history_md: str) -> BytesIO:
                 story.append(Paragraph(link_part, styles["Normal"]))
             story.append(Spacer(1, 6))
         elif line and ":" in line:
-            role, content = line.split(": ", 1)
-            story.append(Paragraph(f"{role}: {content}", styles["Normal"]))
-            story.append(Spacer(1, 6))
+            try:
+                role, content = line.split(": ", 1)
+                story.append(Paragraph(f"{role}: {content}", styles["Normal"]))
+                story.append(Spacer(1, 6))
+            except ValueError:
+                logging.warning(f"Skipping invalid line in PDF: {line}")
+                continue
 
     doc.build(story)
     buffer.seek(0)
