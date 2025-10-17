@@ -4,7 +4,7 @@ import logging
 import concurrent.futures
 import time
 import os
-from typing import List
+from typing import List  # Corrected import syntax
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
@@ -119,7 +119,7 @@ try:
     search_service = (
         root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
         .schemas["PUBLIC"]
-        .cortex_search_service["FOMC_SEARCH_SERVICE"]
+        .cortex_search_services["FOMC_SEARCH_SERVICE"]
     )
 except Exception as e:
     st.error("Failed to initialize Snowflake connection.")
@@ -321,8 +321,8 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
 
-def generate_response_stream(query: str, context: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
-    prompt = build_system_prompt(query, context, conversation_history)
+def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
+    prompt = build_system_prompt(query, contexts, conversation_history)
 
     def run_completion(model_to_use):
         return complete(model_to_use, prompt, stream=True, session=session)
@@ -337,7 +337,7 @@ def generate_response_stream(query: str, context: List[dict], conversation_histo
             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
             st.warning("Response took too long. Trying faster model...")
             try:
-                prompt = build_system_prompt(query, context[:3], "")
+                prompt = build_system_prompt(query, contexts[:3], "")
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
                 logging.error(f"Fallback completion failed: {e}")
@@ -348,7 +348,7 @@ def generate_response_stream(query: str, context: List[dict], conversation_histo
 
     try:
         logging.warning("Falling back to non-streaming completion.")
-        prompt = build_system_prompt(query, context[:3], "")
+        prompt = build_system_prompt(query, contexts[:3], "")
         backup = complete("mixtral-8x7b", prompt, session=session)
         return iter([backup])
     except Exception as e:
@@ -373,18 +373,18 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=letter)
-    style = getSampleStyleSheet()
+    styles = getSampleStyleSheet()
     story = []
     for line in history_md.split("\n"):
         if line.startswith("#"):
-            story.append(Paragraph(line.lstrip("# "), style["Title"]))
+            story.append(Paragraph(line.lstrip("# "), styles["Title"]))
         elif line.startswith("**"):
             role, content = line.split("**: ", 1)
-            story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", style["Normal"]))
+            story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
         elif line.startswith("- **"):
-            story.append(Paragraph(line, style["Normal"]))
+            story.append(Paragraph(line, styles["Normal"]))
         else:
-            story.append(Paragraph(line, style["Normal"]))
+            story.append(Paragraph(line, styles["Normal"]))
         story.append(Spacer(1, 12))
     doc.build(story)
     buffer.seek(0)
@@ -395,14 +395,14 @@ def run_query(user_query: str):
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
     
     with st.spinner("Searching documents..."):
-        context = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
+        contexts = retrieve_with_timeout(user_query, timeout=25.0, retries=1)
     
-    if not context:
+    if not contexts:
         st.info("No relevant context found. Answering from general knowledge.")
 
-    st.session_state.last_contexts = context[:5]
+    st.session_state.last_contexts = contexts[:5]
     with st.spinner("Generating response..."):
-        stream = generate_response_stream(user_query, context, conversation_history)
+        stream = generate_response_stream(user_query, contexts, conversation_history)
     
     response_text = ""
     assistant_container = st.chat_message("assistant", avatar="🤖")
@@ -417,12 +417,12 @@ def run_query(user_query: str):
 
     st.session_state.messages.append({"role": "assistant", "content": response_text})
     st.session_state.has_queried = True
-    st.session_state.follow_up_suggestions = get_dynamic_follow_up(query)
+    st.session_state.follow_up_suggestions = get_dynamic_follow_ups(user_query)
 
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
 
-    top_contexts = context[:5] if context else []
+    top_contexts = contexts[:5] if contexts else []
     with st.expander("📄 View Context (top 5)", expanded=False):
         if not top_contexts:
             st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
