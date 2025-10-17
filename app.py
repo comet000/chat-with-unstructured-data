@@ -406,6 +406,9 @@ def run_query(user_query: str):
         """).collect()
     except Exception as e:
         logging.error(f"Logging failed: {e}")
+    
+    # Force rerun to show buttons and follow-ups
+    st.rerun()
 
 # INITIAL SETUP
 st.set_page_config(
@@ -440,14 +443,10 @@ for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
-# Chat input and buttons
+# Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
-if user_input:
-    st.chat_message("user", avatar="👤").write(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    run_query(user_input)
 
-# Buttons directly below chat input
+# Buttons directly below chat input (always visible when there are messages)
 if st.session_state.messages:
     col1, col2 = st.columns(2)
     with col1:
@@ -457,7 +456,9 @@ if st.session_state.messages:
             st.session_state.last_contexts.clear()
             st.rerun()
     with col2:
-        history_md = "# Chat History\n\n"
+        # Use actual current time for timestamp
+        current_time = datetime.now().strftime("%B %d, %Y %I:%M %p")
+        history_md = f"# Chat History - {current_time}\n\n"
         for msg in st.session_state.messages:
             history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
         if st.session_state.last_contexts:
@@ -466,23 +467,37 @@ if st.session_state.messages:
                 title = extract_clean_title(c["file_name"])
                 pdf_url = create_direct_link(c["file_name"])
                 snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                history_md += f"- **{title}** ({pdf_url})\n {snippet}\n\n"
+                # Format without the word "Link"
+                history_md += f"- **{title}**\n  {pdf_url}\n  {snippet}\n\n"
         else:
             history_md += "## Sources\n\nNo documents found for the last query.\n"
         
         pdf_buffer = create_pdf(history_md)
         st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
 
-# Dynamic follow-ups
-if st.session_state.messages:
-    last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
-    follow_ups = get_dynamic_follow_ups(last_response)
-    st.write("Suggested follow-ups:")
-    for suggestion in follow_ups:
-        if st.button(suggestion):
-            st.chat_message("user", avatar="👤").write(suggestion)
-            st.session_state.messages.append({"role": "user", "content": suggestion})
-            run_query(suggestion)
+# Dynamic follow-ups (visible when there are messages)
+if st.session_state.messages and len(st.session_state.messages) > 0:
+    last_user_msg = ""
+    for msg in reversed(st.session_state.messages):
+        if msg["role"] == "user":
+            last_user_msg = msg["content"]
+            break
+    
+    if last_user_msg:
+        follow_ups = get_dynamic_follow_ups(last_user_msg)
+        st.write("**Suggested follow-ups:**")
+        cols = st.columns(len(follow_ups))
+        for idx, suggestion in enumerate(follow_ups):
+            with cols[idx]:
+                if st.button(suggestion, key=f"followup_{idx}_{suggestion[:20]}"):
+                    st.session_state.messages.append({"role": "user", "content": suggestion})
+                    st.rerun()
+
+# Process user input
+if user_input:
+    st.chat_message("user", avatar="👤").write(user_input)
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    run_query(user_input)
 
 # Example questions in sidebar
 st.sidebar.header("Example Questions")
@@ -503,6 +518,5 @@ example_questions = [
 ]
 for question in example_questions:
     if st.sidebar.button(question, key=f"example_{question[:50]}"):
-        st.chat_message("user", avatar="👤").write(question)
         st.session_state.messages.append({"role": "user", "content": question})
-        run_query(question)
+        st.rerun()
