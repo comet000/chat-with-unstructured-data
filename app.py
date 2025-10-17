@@ -440,14 +440,14 @@ for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
-# Chat input
+# Chat input and buttons
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
 if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
 
-# Buttons below chat input
+# Buttons directly below chat input
 if st.session_state.messages:
     col1, col2 = st.columns(2)
     with col1:
@@ -457,8 +457,7 @@ if st.session_state.messages:
             st.session_state.last_contexts.clear()
             st.rerun()
     with col2:
-        current_time = datetime.now().strftime("%B %d, %Y %H:%M")
-        history_md = f"# Chat History - {current_time}\n\n"
+        history_md = "# Chat History\n\n"
         for msg in st.session_state.messages:
             history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
         if st.session_state.last_contexts:
@@ -467,7 +466,7 @@ if st.session_state.messages:
                 title = extract_clean_title(c["file_name"])
                 pdf_url = create_direct_link(c["file_name"])
                 snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                history_md += f"- **{title}** ([Link]({pdf_url}))\n {snippet}\n\n"
+                history_md += f"- **{title}** ({pdf_url})\n {snippet}\n\n"
         else:
             history_md += "## Sources\n\nNo documents found for the last query.\n"
         
