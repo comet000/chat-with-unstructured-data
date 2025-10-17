@@ -293,26 +293,9 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
         return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
-def get_dynamic_follow_ups(query: str) -> List[str]:
-    """
-    Generate relevant follow-up questions based on the query content.
-    """
-    query_lower = query.lower()
-    if "rate" in query_lower or "fed funds" in query_lower:
-        return ["Why were rates adjusted?", "What are the projected rates for next year?"]
-    elif "inflation" in query_lower or "cpi" in query_lower:
-        return ["What factors drove inflation?", "How does inflation compare to the Fed's target?"]
-    elif "beige book" in query_lower:
-        return ["What were the regional differences?", "How did specific sectors perform?"]
-    elif "labor" in query_lower or "employment" in query_lower:
-        return ["What are the unemployment trends?", "How do wages impact policy?"]
-    elif "fomc" in query_lower or "meeting" in query_lower:
-        return ["What were the key discussion points?", "How did the FOMC's views change over time?"]
-    else:
-        return ["Why did this happen?", "What are the projections for next year?"]
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y") # 12:34 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y") # 03:28 PM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
