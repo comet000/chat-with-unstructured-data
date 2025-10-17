@@ -317,7 +317,7 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:00 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:05 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
@@ -451,19 +451,22 @@ for question in example_questions:
         st.session_state.messages.append({"role": "user", "content": question})
         run_query(question)
 
-# MAIN CHAT INTERFACE
-for msg in st.session_state.messages:
-    if msg["role"] in ["user", "assistant"]:
-        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
-
-user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
-if user_input:
-    st.chat_message("user", avatar="👤").write(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    run_query(user_input)
-
-# RIGHT COLUMN FOR CONVERSATION TOOLS
+# COLUMN LAYOUT FOR CHAT AND TOOLS
 main_col, right_col = st.columns([3, 1])
+
+with main_col:
+    # Display chat history
+    for msg in st.session_state.messages:
+        if msg["role"] in ["user", "assistant"]:
+            st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+
+    # Chat input
+    user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
+    if user_input:
+        st.chat_message("user", avatar="👤").write(user_input)
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        run_query(user_input)
+
 with right_col:
     st.header("Conversation Tools")
     st.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
