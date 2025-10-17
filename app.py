@@ -14,11 +14,14 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 # CACHE & MESSAGE MANAGEMENT HELPERS
 def cache_with_limit(cache_dict, key, value):
     cache_dict[key] = value
+
 def get_recent_conversation_context(messages, max_pairs=2):
     """
     Get only the last N user/assistant pairs for conversation context.
@@ -31,6 +34,7 @@ def get_recent_conversation_context(messages, max_pairs=2):
         history.append((f"{role}: {msg['content']}", weight))
     history.sort(key=lambda x: x[1], reverse=True)
     return "\n".join(h[0] for h in history) if history else ""
+
 # SNOWFLAKE CONNECTION
 @st.cache_resource
 def create_snowflake_session():
@@ -67,6 +71,7 @@ def create_snowflake_session():
         logging.error(f"Failed to create Snowflake session: {e}")
         st.error(f"Cannot connect to Snowflake: {e}. Please check credentials and try again.")
         raise
+
 try:
     session = create_snowflake_session()
     root = Root(session)
@@ -78,17 +83,21 @@ try:
 except Exception as e:
     st.error("Failed to initialize Snowflake connection. Please check logs and secrets configuration.")
     st.stop()
+
 # TEXT & FILE HELPERS
 def extract_target_years(query: str) -> List[int]:
     return [int(y) for y in re.findall(r"20\d{2}", query)]
+
 def extract_file_year(file_name: str) -> int:
     match = re.search(r"(\d{4})", file_name)
     return int(match.group(1)) if match else 0
+
 def clean_chunk(chunk: str) -> str:
     cleaned = re.sub(r"!\[.*?\]\(.*?\)", "", chunk)
     cleaned = re.sub(r"#{1,6}\s*", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
 def extract_clean_title(file_name: str) -> str:
     month_map = {
         "01": "January", "02": "February", "03": "March", "04": "April",
@@ -121,6 +130,7 @@ def extract_clean_title(file_name: str) -> str:
     else:
         doc_type = "FOMC Document"
     return f"{doc_type} - {date_str}"
+
 def create_direct_link(file_name: str) -> str:
     try:
         base = "https://www.federalreserve.gov"
@@ -144,6 +154,7 @@ def create_direct_link(file_name: str) -> str:
     except Exception as e:
         logging.error(f"create_direct_link failed for {file_name}: {e}")
         return f"https://www.federalreserve.gov/monetarypolicy/files/{file_name.split('/')[-1]}"
+
 # RETRIEVER CLASS
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit: int = 12):
@@ -177,6 +188,7 @@ class CortexSearchRetriever:
             st.error(f"❌ Cortex Search Error: {e}")
             return []
 rag_retriever = CortexSearchRetriever(session)
+
 # PROMPT GENERATION (OPTIMIZED)
 glossary = """
 Glossary:
@@ -223,6 +235,7 @@ User Question: {query}
 Answer:"""
   
     return prompt
+
 # LLM COMPLETION (OPTIMIZED)
 def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -> List[dict]:
     """
@@ -258,6 +271,7 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
     if fallback:
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
+
 def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
     """
     Streaming call with retries and fallback to faster model.
@@ -293,34 +307,40 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
     except Exception as e:
         logging.error(f"Backup completion failed: {e}")
         return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
+
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y") # 03:28 PM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%B %d, %Y %I:%M %p EDT") # October 17, 2025 03:36 PM EDT
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
-    story.append(Paragraph(f"# Chat History - {current_time}", styles["Title"]))
+    # Header with date and time
+    story.append(Paragraph(f"Chat History - {current_time}", styles["Title"]))
+    story.append(Spacer(1, 12))
+    
+    # Process chat history
     for line in history_md.split("\n"):
-        if line.startswith("#") and not line.startswith("# Chat History"):
-            story.append(Paragraph(line.lstrip("# "), styles["Heading1"]))
-        elif line.startswith("**"):
-            role, content = line.split("**: ", 1)
-            story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
-        elif line.startswith("- **"):
-            parts = line.split("** (")
+        if line.startswith("# Chat History"):
+            continue
+        elif line.startswith("# Sources") or line.startswith("# Sources Used in Last Response"):
+            story.append(Paragraph("Sources", styles["Heading1"]))
+            story.append(Spacer(1, 6))
+        elif line.startswith("- "):
+            parts = line.split(" (")
             if len(parts) > 1:
-                title = parts[1].split(")", 1)[0]
-                rest = parts[1].split(")", 1)[1] if len(parts[1].split(")", 1)) > 1 else ""
-                snippet = rest.strip() if rest and "\n" in rest else ""
-                story.append(Paragraph(f"- **{title.strip()}** ({parts[0].replace('- **', '')})", styles["Normal"]))
-                if snippet:
-                    story.append(Paragraph(snippet, styles["Normal"]))
-        else:
-            story.append(Paragraph(line, styles["Normal"]))
-        story.append(Spacer(1, 12))
+                title_date = parts[1].rstrip(")")
+                story.append(Paragraph(title_date, styles["Normal"]))
+                story.append(Paragraph(parts[0][2:], styles["Normal"]))
+            story.append(Spacer(1, 6))
+        elif line:
+            role, content = line.split(": ", 1)
+            story.append(Paragraph(f"{role}: {content}", styles["Normal"]))
+            story.append(Spacer(1, 6))
+
     doc.build(story)
     buffer.seek(0)
     return buffer
+
 def run_query(user_query: str):
     """
     Main query execution with logging for production monitoring.
@@ -382,7 +402,7 @@ def run_query(user_query: str):
     # """).collect()
     # except Exception as e:
     # logging.error(f"Logging failed: {e}")
-    # Render buttons and follow-ups after each response
+    # Render buttons
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🧹 Clear Conversation"):
@@ -393,12 +413,13 @@ def run_query(user_query: str):
     with col2:
         history_md = "\n".join([
             "# Chat History",
-            *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
-            *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
-            *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
+            *[f"User: {msg['content']}" if msg['role'] == 'user' else f"Assistant: {msg['content']}" for msg in st.session_state.messages],
+            *(["# Sources Used in Last Response"] if st.session_state.last_contexts else ["# Sources"]),
+            *([f"- {create_direct_link(c['file_name'])} ( {extract_clean_title(c['file_name'])} )\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
         ])
         pdf_buffer = create_pdf(history_md)
         st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
+
 # INITIAL SETUP
 st.set_page_config(
     page_title="Chat with the Federal Reserve",
@@ -425,17 +446,20 @@ if "rag_cache" not in st.session_state:
     st.session_state.rag_cache = LRUCache(maxsize=20)
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
+
 # STREAMLIT UI LOGIC
 # Display chat history
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+
 # Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
 if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
+
 # Example questions in sidebar
 st.sidebar.header("Example Questions")
 example_questions = [
