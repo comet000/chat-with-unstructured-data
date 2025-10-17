@@ -459,7 +459,7 @@ if user_input:
     st.chat_message("user", avatar="👤").write(user_input)
     # MODIFICATION: Add an empty 'contexts' list to user messages for consistent data structure.
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
-    run_query(user_query)
+    run_query(user_input)
     st.rerun() # Rerun to display the context and buttons immediately.
 
 
@@ -492,3 +492,4 @@ for question in example_questions:
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
         st.rerun() # Rerun to display the context and buttons immediately.
+
