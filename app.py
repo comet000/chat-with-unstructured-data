@@ -329,7 +329,7 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 01:13 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 01:27 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
@@ -418,6 +418,9 @@ def run_query(user_query: str):
                 st.caption(snippet)
                 st.divider()
 
+    # Force sidebar refresh
+    st.sidebar.empty()
+
 # INITIAL SETUP
 st.set_page_config(
     page_title="Chat with the Federal Reserve",
@@ -460,11 +463,7 @@ if user_input:
 
 # Sidebar for controls
 st.sidebar.header("Conversation Tools")
-if st.sidebar.button("🧹 Clear Conversation"):
-    st.session_state.messages.clear()
-    st.session_state.rag_cache.clear()
-    st.session_state.last_contexts.clear()
-    st.rerun()
+st.sidebar.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
 if st.session_state.messages:
     history_md = "\n".join([
         "# Chat History",
