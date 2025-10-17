@@ -317,7 +317,7 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:05 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 02:10 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
@@ -416,6 +416,18 @@ st.markdown(
     <style>
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
+    .right-panel {
+        position: fixed;
+        top: 70px;
+        right: 10px;
+        width: 300px;
+        background-color: #f9f9f9;
+        padding: 1rem;
+        border-left: 1px solid #ddd;
+        height: 90vh;
+        overflow-y: auto;
+        z-index: 1000;
+    }
     </style>
     """,
     unsafe_allow_html=True
@@ -451,38 +463,35 @@ for question in example_questions:
         st.session_state.messages.append({"role": "user", "content": question})
         run_query(question)
 
-# COLUMN LAYOUT FOR CHAT AND TOOLS
-main_col, right_col = st.columns([3, 1])
+# MAIN CHAT INTERFACE
+for msg in st.session_state.messages:
+    if msg["role"] in ["user", "assistant"]:
+        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
 
-with main_col:
-    # Display chat history
-    for msg in st.session_state.messages:
-        if msg["role"] in ["user", "assistant"]:
-            st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
+if user_input:
+    st.chat_message("user", avatar="👤").write(user_input)
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    run_query(user_input)
 
-    # Chat input
-    user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
-    if user_input:
-        st.chat_message("user", avatar="👤").write(user_input)
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        run_query(user_input)
-
-with right_col:
-    st.header("Conversation Tools")
-    st.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
-    if st.session_state.messages:
-        history_md = "\n".join([
-            "# Chat History",
-            *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
-            *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
-            *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
-        ])
-        st.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
-        last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
-        follow_ups = get_dynamic_follow_ups(last_response)
-        st.write("Suggested Follow-ups:")
-        for suggestion in follow_ups:
-            if st.button(suggestion):
-                st.chat_message("user", avatar="👤").write(suggestion)
-                st.session_state.messages.append({"role": "user", "content": suggestion})
-                run_query(suggestion)
+# RIGHT PANEL FOR CONVERSATION TOOLS
+st.markdown("<div class='right-panel'>", unsafe_allow_html=True)
+st.header("Conversation Tools")
+st.button("🧹 Clear Conversation", on_click=lambda: [st.session_state.messages.clear(), st.session_state.rag_cache.clear(), st.session_state.last_contexts.clear(), st.rerun()])
+if st.session_state.messages:
+    history_md = "\n".join([
+        "# Chat History",
+        *[f"**{msg['role'].capitalize()}**: {msg['content']}" for msg in st.session_state.messages],
+        *(["## Sources Used in Last Response"] if st.session_state.last_contexts else ["## Sources"]),
+        *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
+    ])
+    st.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
+    last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
+    follow_ups = get_dynamic_follow_ups(last_response)
+    st.write("Suggested Follow-ups:")
+    for suggestion in follow_ups:
+        if st.button(suggestion):
+            st.chat_message("user", avatar="👤").write(suggestion)
+            st.session_state.messages.append({"role": "user", "content": suggestion})
+            run_query(suggestion)
+st.markdown("</div>", unsafe_allow_html=True)
