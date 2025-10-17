@@ -319,10 +319,10 @@ def create_pdf(messages: List[dict]) -> BytesIO:
     """
     buffer = BytesIO()
     
-    # Issue 2 Fix: Format time correctly, removing leading zero from the hour.
     now = datetime.now(ZoneInfo("America/New_York"))
     hour = now.strftime("%I").lstrip('0')
-    current_time = now.strftime(f"%B %d, %Y {hour}:%M p EDT")
+    am_pm = now.strftime("%p").lower()
+    current_time = now.strftime(f"%B %d, %Y {hour}:%M {am_pm} EDT")
 
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
@@ -429,7 +429,7 @@ for msg in st.session_state.messages:
 # After displaying all messages, show the context and buttons for the LAST assistant message.
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
     top_contexts = st.session_state.messages[-1].get("contexts", [])
-    with st.expander("📄 View Context (top 5)", expanded=True):
+    with st.expander("📄 View Context (top 5)", expanded=False):
         if not top_contexts:
             st.markdown("No relevant documents found. Check https://www.federalreserve.gov.")
         else:
