@@ -1,4 +1,4 @@
-tstreamlit
+streamlit
 snowflake-snowpark-python
 snowflake-ml-python
 trulens-core
