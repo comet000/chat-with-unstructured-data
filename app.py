@@ -17,6 +17,17 @@ from io import BytesIO
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# ---------------------------
+# Helper utilities
+# ---------------------------
+def now_timestamp_str():
+    """Return timezone-aware timestamp string with seconds where possible."""
+    try:
+        return datetime.now().astimezone().strftime("%B %d, %Y %H:%M:%S %Z")
+    except Exception:
+        # Fallback
+        return datetime.now().strftime("%B %d, %Y %H:%M:%S")
+
 # CACHE & MESSAGE MANAGEMENT HELPERS
 def cache_with_limit(cache_dict, key, value):
     cache_dict[key] = value
@@ -34,7 +45,7 @@ def get_recent_conversation_context(messages, max_pairs=2):
     history.sort(key=lambda x: x[1], reverse=True)
     return "\n".join(h[0] for h in history) if history else ""
 
-# SNOWFLAKE CONNECTION
+# SNOWFLAKE CONNECTION (unchanged, aside from using create_snowflake_session decorator)
 @st.cache_resource
 def create_snowflake_session():
     try:
@@ -83,7 +94,7 @@ except Exception as e:
     st.error("Failed to initialize Snowflake connection. Please check logs and secrets configuration.")
     st.stop()
 
-# TEXT & FILE HELPERS
+# TEXT & FILE HELPERS (unchanged aside from PDF builder tweaks)
 def extract_target_years(query: str) -> List[int]:
     return [int(y) for y in re.findall(r"20\d{2}", query)]
 
@@ -154,7 +165,7 @@ def create_direct_link(file_name: str) -> str:
         logging.error(f"create_direct_link failed for {file_name}: {e}")
         return f"https://www.federalreserve.gov/monetarypolicy/files/{file_name.split('/')[-1]}"
 
-# RETRIEVER CLASS
+# RETRIEVER CLASS (unchanged)
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit: int = 12):
         self._root = Root(snowpark_session)
@@ -188,7 +199,7 @@ class CortexSearchRetriever:
             return []
 rag_retriever = CortexSearchRetriever(session)
 
-# PROMPT GENERATION (OPTIMIZED)
+# PROMPT GENERATION (unchanged)
 glossary = """
 Glossary:
 - Dot Plot: A chart showing each FOMC participant's forecast for the federal funds rate.
@@ -197,10 +208,6 @@ Glossary:
 - Federal Funds Rate Target: The interest rate that the Fed targets for overnight lending between banks.
 """
 def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
-    """
-    Build an optimized system prompt with limited context size and inference encouragement.
-    """
-    # Group contexts by year (limit to top 5 to reduce size)
     year_buckets = {}
     for c in contexts[:5]:
         year = extract_file_year(c["file_name"])
@@ -235,19 +242,13 @@ Answer:"""
    
     return prompt
 
-# LLM COMPLETION (OPTIMIZED)
+# LLM COMPLETION (unchanged)
 def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -> List[dict]:
-    """
-    Wrap rag_retriever.retrieve with timeout, retry, and caching.
-    """
     if not query:
         return []
-    # Normalize query for cache
     def normalize_query(q):
         return re.sub(r'[^\w\s]', '', q.lower()).strip()
-   
     norm_query = normalize_query(query)
-    # Check cache first
     if norm_query in st.session_state.rag_cache:
         return st.session_state.rag_cache[norm_query]
     def _call():
@@ -265,16 +266,12 @@ def retrieve_with_timeout(query: str, timeout: float = 25.0, retries: int = 1) -
         except Exception as e:
             logging.error(f"Retrieval error (attempt {attempt+1}/{retries+1}): {e}")
             time.sleep(1)
-    # Fallback to cached result if available
     fallback = st.session_state.rag_cache.get(norm_query, [])
     if fallback:
         logging.warning("Using cached retrieval results as fallback.")
     return fallback
 
 def generate_response_stream(query: str, contexts: List[dict], conversation_history: str = "", model="claude-3-5-sonnet"):
-    """
-    Streaming call with retries and fallback to faster model.
-    """
     prompt = build_system_prompt(query, contexts, conversation_history)
     def run_completion(model_to_use):
         return complete(model_to_use, prompt, stream=True, session=session)
@@ -288,7 +285,6 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
             logging.warning(f"Cortex response timed out (attempt {attempt+1}/{max_retries+1})")
             st.warning("Response took too long. Trying faster model...")
             try:
-                # Fallback to faster model with fewer contexts
                 prompt = build_system_prompt(query, contexts[:3], "")
                 return iter([complete("mixtral-8x7b", prompt, session=session)])
             except Exception as e:
@@ -297,7 +293,6 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         except Exception as e:
             logging.error(f"Cortex streaming error (attempt {attempt+1}/{max_retries+1}): {e}")
             time.sleep(2)
-    # Final fallback
     try:
         logging.warning("Falling back to non-streaming completion.")
         prompt = build_system_prompt(query, contexts[:3], "")
@@ -307,11 +302,11 @@ def generate_response_stream(query: str, contexts: List[dict], conversation_hist
         logging.error(f"Backup completion failed: {e}")
         return iter(["I apologize, but I'm having trouble generating a response right now. Please try again."])
 
-def get_dynamic_follow_ups(query: str) -> List[str]:
+def get_dynamic_follow_ups(query_or_text: str) -> List[str]:
     """
-    Generate relevant follow-up questions based on the query content.
+    Generate relevant follow-up questions based on the query text or assistant text.
     """
-    query_lower = query.lower()
+    query_lower = (query_or_text or "").lower()
     if "rate" in query_lower or "fed funds" in query_lower:
         return ["Why were rates adjusted?", "What are the projected rates for next year?"]
     elif "inflation" in query_lower or "cpi" in query_lower:
@@ -336,8 +331,6 @@ def create_pdf(history_md: str) -> BytesIO:
         elif line.startswith("**"):
             role, content = line.split("**: ", 1)
             story.append(Paragraph(f"<b>{role.lstrip('* ')}</b>: {content}", styles["Normal"]))
-        elif line.startswith("- **"):
-            story.append(Paragraph(line, styles["Normal"]))
         else:
             story.append(Paragraph(line, styles["Normal"]))
         story.append(Spacer(1, 12))
@@ -345,9 +338,13 @@ def create_pdf(history_md: str) -> BytesIO:
     buffer.seek(0)
     return buffer
 
+# ---------------------------
+# Main query runner (modified to add timestamps and flags)
+# ---------------------------
 def run_query(user_query: str):
     """
     Main query execution with logging for production monitoring.
+    This function appends assistant message and sets session flags so UI controls render immediately.
     """
     start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
@@ -375,11 +372,18 @@ def run_query(user_query: str):
         except Exception:
             logging.exception("Error while streaming chunk")
     generation_time = time.time() - start_time - retrieval_time
-    st.session_state.messages.append({"role": "assistant", "content": response_text})
+
+    # append assistant message with timestamp and store last_assistant_content
+    assistant_timestamp = now_timestamp_str()
+    st.session_state.messages.append({"role": "assistant", "content": response_text, "timestamp": assistant_timestamp})
+    st.session_state.last_assistant_content = response_text
+    st.session_state.show_controls = True  # ensure controls are shown after assistant reply
+
     # Limit message history
-    if len(st.session_state.messages) > 10:
-        st.session_state.messages = st.session_state.messages[-10:]
-    # Show context sources
+    if len(st.session_state.messages) > 50:
+        st.session_state.messages = st.session_state.messages[-50:]
+
+    # Show context sources (unchanged)
     top_contexts = contexts[:5] if contexts else []
     with st.expander("📄 View Context (top 5)", expanded=False):
         if not top_contexts:
@@ -393,7 +397,7 @@ def run_query(user_query: str):
                 st.caption(snippet)
                 st.divider()
    
-    # Log to Snowflake
+    # Log to Snowflake (unchanged)
     try:
         context_size = sum(len(c["chunk"]) for c in contexts)
         session.sql(f"""
@@ -406,11 +410,10 @@ def run_query(user_query: str):
         """).collect()
     except Exception as e:
         logging.error(f"Logging failed: {e}")
-    
-    # Force rerun to show buttons and follow-ups
-    st.rerun()
 
-# INITIAL SETUP
+# ---------------------------
+# INITIAL SETUP & UI
+# ---------------------------
 st.set_page_config(
     page_title="Chat with the Federal Reserve",
     page_icon="💬",
@@ -428,6 +431,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 # Initialize session state keys
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -436,70 +440,83 @@ if "rag_cache" not in st.session_state:
     st.session_state.rag_cache = LRUCache(maxsize=20)
 if "last_contexts" not in st.session_state:
     st.session_state.last_contexts = []
+if "show_controls" not in st.session_state:
+    st.session_state.show_controls = False
+if "last_assistant_content" not in st.session_state:
+    st.session_state.last_assistant_content = ""
 
-# STREAMLIT UI LOGIC
-# Display chat history
+# Display existing chat history (renders prior messages)
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
-        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(msg["content"], unsafe_allow_html=False)
+        # include timestamp in the display so users see accurate times in-app
+        ts = msg.get("timestamp", "")
+        display_text = f"{msg['content']}\n\n*{ts}*" if ts else msg["content"]
+        st.chat_message(msg["role"], avatar="👤" if msg["role"] == "user" else "🤖").markdown(display_text, unsafe_allow_html=False)
 
-# Chat input
+# Chat input (controls are placed directly below this input)
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, or Beige Book insights...")
+# We'll create a container directly below the input for the buttons so they appear close to it
+controls_container = st.container()
 
-# Buttons directly below chat input (always visible when there are messages)
-if st.session_state.messages:
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🧹 Clear Conversation"):
-            st.session_state.messages.clear()
-            st.session_state.rag_cache.clear()
-            st.session_state.last_contexts.clear()
-            st.rerun()
-    with col2:
-        # Use actual current time for timestamp
-        current_time = datetime.now().strftime("%B %d, %Y %I:%M %p")
-        history_md = f"# Chat History - {current_time}\n\n"
-        for msg in st.session_state.messages:
-            history_md += f"**{msg['role'].capitalize()}**: {msg['content']}\n\n"
-        if st.session_state.last_contexts:
-            history_md += "## Sources Used in Last Response\n\n"
-            for c in st.session_state.last_contexts:
-                title = extract_clean_title(c["file_name"])
-                pdf_url = create_direct_link(c["file_name"])
-                snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
-                # Format without the word "Link"
-                history_md += f"- **{title}**\n  {pdf_url}\n  {snippet}\n\n"
-        else:
-            history_md += "## Sources\n\nNo documents found for the last query.\n"
-        
-        pdf_buffer = create_pdf(history_md)
-        st.download_button("📥 Download Chat History", pdf_buffer, "chat_history.pdf", "application/pdf")
-
-# Dynamic follow-ups (visible when there are messages)
-if st.session_state.messages and len(st.session_state.messages) > 0:
-    last_user_msg = ""
-    for msg in reversed(st.session_state.messages):
-        if msg["role"] == "user":
-            last_user_msg = msg["content"]
-            break
-    
-    if last_user_msg:
-        follow_ups = get_dynamic_follow_ups(last_user_msg)
-        st.write("**Suggested follow-ups:**")
-        cols = st.columns(len(follow_ups))
-        for idx, suggestion in enumerate(follow_ups):
-            with cols[idx]:
-                if st.button(suggestion, key=f"followup_{idx}_{suggestion[:20]}"):
-                    st.session_state.messages.append({"role": "user", "content": suggestion})
-                    st.rerun()
-
-# Process user input
+# If user just submitted input, append it (with timestamp) and run
 if user_input:
+    user_ts = now_timestamp_str()
     st.chat_message("user", avatar="👤").write(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.session_state.messages.append({"role": "user", "content": user_input, "timestamp": user_ts})
+    # Reset show_controls until assistant responds
+    st.session_state.show_controls = False
     run_query(user_input)
 
-# Example questions in sidebar
+# Buttons below chat input (now in the controls_container so they are near the input)
+with controls_container:
+    if st.session_state.show_controls and st.session_state.messages:
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("🧹 Clear Conversation"):
+                st.session_state.messages.clear()
+                st.session_state.rag_cache.clear()
+                st.session_state.last_contexts.clear()
+                st.session_state.last_assistant_content = ""
+                st.session_state.show_controls = False
+                st.experimental_rerun()
+        with col2:
+            # Build chat history markdown for PDF
+            current_time = now_timestamp_str()
+            history_md = f"# Chat History - {current_time}\n\n"
+            for msg in st.session_state.messages:
+                ts = msg.get("timestamp", now_timestamp_str())
+                role_cap = msg["role"].capitalize()
+                # include per-message timestamp so exported PDF is accurate
+                history_md += f"**{role_cap}** ({ts}): {msg['content']}\n\n"
+            if st.session_state.last_contexts:
+                history_md += "## Sources Used in Last Response\n\n"
+                # NOTE: Removed the word "Link" before urls per your request – include raw URLs
+                for c in st.session_state.last_contexts:
+                    title = extract_clean_title(c["file_name"])
+                    pdf_url = create_direct_link(c["file_name"])
+                    snippet = clean_chunk(c["chunk"])[:350] + ("..." if len(c["chunk"]) > 350 else "")
+                    history_md += f"- **{title}**: {pdf_url}\n  {snippet}\n\n"
+            else:
+                history_md += "## Sources\n\nNo documents found for the last query.\n"
+
+            pdf_buffer = create_pdf(history_md)
+            filename_time = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+            st.download_button("📥 Download Chat History", pdf_buffer, f"chat_history_{filename_time}.pdf", "application/pdf")
+
+# Suggested follow-ups (rendered right after the controls and only when show_controls True)
+if st.session_state.show_controls and st.session_state.last_assistant_content:
+    st.write("Suggested follow-ups:")
+    follow_ups = get_dynamic_follow_ups(st.session_state.last_assistant_content)
+    for suggestion in follow_ups:
+        if st.button(suggestion):
+            # Append the suggested question as a user message with timestamp and run it
+            ts = now_timestamp_str()
+            st.chat_message("user", avatar="👤").write(suggestion)
+            st.session_state.messages.append({"role": "user", "content": suggestion, "timestamp": ts})
+            st.session_state.show_controls = False
+            run_query(suggestion)
+
+# Example questions in sidebar (unchanged except we add timestamps when appending)
 st.sidebar.header("Example Questions")
 example_questions = [
     "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
@@ -518,5 +535,8 @@ example_questions = [
 ]
 for question in example_questions:
     if st.sidebar.button(question, key=f"example_{question[:50]}"):
-        st.session_state.messages.append({"role": "user", "content": question})
-        st.rerun()
+        ts = now_timestamp_str()
+        st.chat_message("user", avatar="👤").write(question)
+        st.session_state.messages.append({"role": "user", "content": question, "timestamp": ts})
+        st.session_state.show_controls = False
+        run_query(question)
