@@ -329,7 +329,7 @@ def get_dynamic_follow_ups(query: str) -> List[str]:
 
 def create_pdf(history_md: str) -> BytesIO:
     buffer = BytesIO()
-    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 12:53 AM EDT, October 17, 2025
+    current_time = datetime.now(ZoneInfo("America/New_York")).strftime("%I:%M %p EDT, %B %d, %Y")  # 01:02 AM EDT, October 17, 2025
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     styles['Normal'].fontName = 'Helvetica'
@@ -458,7 +458,7 @@ if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
     run_query(user_input)
 
-# Sidebar for controls and follow-ups
+# Sidebar for controls
 st.sidebar.header("Conversation Tools")
 if st.sidebar.button("🧹 Clear Conversation"):
     st.session_state.messages.clear()
@@ -473,7 +473,6 @@ if st.session_state.messages:
         *([f"- **{extract_clean_title(c['file_name'])}** ({create_direct_link(c['file_name'])})\n {clean_chunk(c['chunk'])[:350] + ('...' if len(c['chunk']) > 350 else '')}" for c in st.session_state.last_contexts] if st.session_state.last_contexts else ["No documents found for the last query."])
     ])
     st.sidebar.download_button("📥 Download Chat History", create_pdf(history_md), "chat_history.pdf", "application/pdf")
-if st.session_state.messages:
     last_response = st.session_state.messages[-1]["content"] if st.session_state.messages[-1]["role"] == "assistant" else ""
     follow_ups = get_dynamic_follow_ups(last_response)
     st.sidebar.write("Suggested Follow-ups:")
@@ -483,7 +482,6 @@ if st.session_state.messages:
             st.session_state.messages.append({"role": "user", "content": suggestion})
             run_query(suggestion)
 
-# Example questions in sidebar
 st.sidebar.header("Example Questions")
 example_questions = [
     "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
