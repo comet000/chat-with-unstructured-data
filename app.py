@@ -208,8 +208,8 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
 
     context_text = "\n\n".join(grouped_texts)
 
-    if len(context_text) > 40000:
-        context_text = context_text[:40000] + "\n[Context truncated for length]"
+    if len(context_text) > 12000:
+        context_text = context_text[:12000] + "\n[Context truncated for length]"
 
     history_section = ""
     if conversation_history:
@@ -254,9 +254,9 @@ def retrieve_cached(query: str) -> List[dict]:
         return []
 
 def cortex_complete_sql(session, model, prompt):
-    safe_prompt = prompt.replace("'", "''").replace("\\", "\\\\")
-    sql = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{model}', '{safe_prompt}') AS response"
-    result = session.sql(sql).collect()
+    result = session.create_dataframe([('x',)], schema=['dummy']).select(
+        call_function('SNOWFLAKE.CORTEX.COMPLETE', lit(model), lit(prompt)).alias('response')
+    ).collect()
     return result[0]['RESPONSE']
 
 
@@ -318,13 +318,13 @@ def run_query(user_query: str):
 
         def fetch_from_snowflake():
             try:
-                result_container["text"] = cortex_complete_sql(session, "mixtral-8x7b", prompt)
+                result_container["text"] = cortex_complete_sql(session, "claude-haiku-4-5", prompt)
             except Exception as e:
                 logging.error(f"Primary model error: {e}")
                 result_container["error"] = str(e)
                 try:
                     fallback_prompt = build_system_prompt(user_query, contexts[:3], "")
-                    result_container["text"] = cortex_complete_sql(session, "llama3.1-8b", fallback_prompt)
+                    result_container["text"] = cortex_complete_sql(session, "mistral-large2", fallback_prompt)
                     result_container["error"] = ""
                 except Exception as e2:
                     logging.error(f"Fallback completion failed: {e2}")
@@ -434,6 +434,7 @@ st.sidebar.markdown(
     unsafe_allow_html=True
 )
 example_questions = [
+    "What are the biggest issues affecting the economy in 2026?",
     "What will be the long-term impact of AI and automation on productivity, wage growth, and the overall demand for labor?",
     "What are greatest risks to financial stability over the next 12–18 months, and how are you monitoring them?",
     "Are businesses still struggling with costs?",
