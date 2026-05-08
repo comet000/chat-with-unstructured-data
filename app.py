@@ -1,7 +1,6 @@
 import streamlit as st
 import re
 import logging
-import time
 import html
 import json
 from typing import List, Dict, Any
@@ -10,12 +9,16 @@ from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import lit, call_function
 from snowflake.core import Root
+from openai import OpenAI
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+PRIMARY_MODEL = "llama3.1-70b"
+FALLBACK_MODEL = "llama3.1-8b"
 
 
 def get_recent_conversation_context(messages, max_pairs=2):
@@ -63,6 +66,14 @@ def get_valid_session():
     except Exception:
         st.cache_resource.clear()
         return create_snowflake_session()
+
+
+@st.cache_resource
+def create_openai_client():
+    account = st.secrets["account"]
+    pat = st.secrets["snowflake_pat"]
+    base_url = f"https://{account}.snowflakecomputing.com/api/v2/cortex/v1"
+    return OpenAI(api_key=pat, base_url=base_url)
 
 
 try:
@@ -209,7 +220,7 @@ class CortexSearchRetriever:
 rag_retriever = CortexSearchRetriever(session)
 
 
-def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
+def build_system_prompt(contexts: List[dict], conversation_history: str = "") -> str:
     year_buckets = {}
     for c in contexts[:3]:
         year = extract_file_year(c["file_name"])
@@ -230,7 +241,7 @@ def build_system_prompt(query: str, contexts: List[dict], conversation_history: 
     if conversation_history:
         history_section = f"<conversation_history>\n{conversation_history}\n</conversation_history>"
 
-    prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
+    return f"""You are an expert economic analyst specializing in Federal Reserve communications.
 Today is {datetime.now():%B %d, %Y}.
 
 <glossary>
@@ -251,12 +262,7 @@ Today is {datetime.now():%B %d, %Y}.
 {context_text}
 </context>
 
-{history_section}
-
-User Question: {query}
-Answer:"""
-
-    return prompt
+{history_section}"""
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -268,6 +274,22 @@ def retrieve_cached(query: str) -> List[dict]:
     except Exception as e:
         logging.error(f"Retrieval error: {e}")
         return []
+
+
+def stream_cortex_response(model: str, system_prompt: str, user_query: str):
+    client = create_openai_client()
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_query},
+        ],
+        stream=True,
+    )
+    for chunk in stream:
+        content = chunk.choices[0].delta.content
+        if content:
+            yield content
 
 
 def cortex_complete_sql(session, model, prompt):
@@ -326,21 +348,27 @@ def run_query(user_query: str):
         if not contexts:
             st.info("No direct context found. Answering from general macroeconomic principles.")
 
-        prompt = build_system_prompt(user_query, contexts, conversation_history)
+        system_prompt = build_system_prompt(contexts, conversation_history)
 
-        with st.spinner("Generating economic synthesis..."):
+        try:
+            response_text = st.write_stream(
+                stream_cortex_response(PRIMARY_MODEL, system_prompt, user_query)
+            )
+        except Exception as e:
+            logging.error(f"Streaming error with {PRIMARY_MODEL}: {e}")
             try:
-                response_text = cortex_complete_sql(session, "mistral-large2", prompt)
-            except Exception as e:
-                logging.error(f"Primary model error: {e}")
+                response_text = st.write_stream(
+                    stream_cortex_response(FALLBACK_MODEL, system_prompt, user_query)
+                )
+            except Exception as e2:
+                logging.error(f"Streaming fallback error: {e2}")
                 try:
-                    fallback_prompt = build_system_prompt(user_query, contexts[:3], "")
-                    response_text = cortex_complete_sql(session, "mixtral-8x7b", fallback_prompt)
-                except Exception as e2:
-                    logging.error(f"Fallback model error: {e2}")
+                    full_prompt = system_prompt + f"\n\nUser Question: {user_query}\nAnswer:"
+                    response_text = cortex_complete_sql(session, FALLBACK_MODEL, full_prompt)
+                    st.markdown(response_text)
+                except Exception as e3:
                     response_text = f"Unable to generate a response. Error: {e}"
-
-        st.markdown(response_text)
+                    st.error(response_text)
 
     top_contexts = contexts[:3] if contexts else []
     st.session_state.messages.append({"role": "assistant", "content": response_text, "contexts": top_contexts})
