@@ -4,3 +4,4 @@ snowflake-snowpark-python
 snowflake-ml-python
 cachetools
 reportlab
+openai
