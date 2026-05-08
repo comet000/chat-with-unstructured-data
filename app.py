@@ -254,9 +254,9 @@ def retrieve_cached(query: str) -> List[dict]:
         return []
 
 def cortex_complete_sql(session, model, prompt):
-    result = session.create_dataframe([('x',)], schema=['dummy']).select(
-        call_function('SNOWFLAKE.CORTEX.COMPLETE', lit(model), lit(prompt)).alias('response')
-    ).collect()
+    safe_prompt = prompt.replace("'", "''").replace("\\", "\\\\")
+    sql = f"SELECT SNOWFLAKE.CORTEX.COMPLETE('{model}', '{safe_prompt}') AS response"
+    result = session.sql(sql).collect()
     return result[0]['RESPONSE']
 
 
