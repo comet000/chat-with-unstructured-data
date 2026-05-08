@@ -1,6 +1,7 @@
 import streamlit as st
 import re
 import logging
+import time
 import html
 import json
 from typing import List, Dict, Any
@@ -9,7 +10,7 @@ from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import lit, call_function
 from snowflake.core import Root
-from openai import OpenAI
+
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -68,13 +69,7 @@ def get_valid_session():
         return create_snowflake_session()
 
 
-@st.cache_resource
-def create_openai_client():
-    account = st.secrets["account"]
-    pat = st.secrets["snowflake_pat"]
-    host = st.secrets.get("host", f"{account}.snowflakecomputing.com")
-    base_url = f"https://{host}/api/v2/cortex/v1"
-    return OpenAI(api_key=pat, base_url=base_url)
+
 
 
 try:
@@ -277,20 +272,11 @@ def retrieve_cached(query: str) -> List[dict]:
         return []
 
 
-def stream_cortex_response(model: str, system_prompt: str, user_query: str):
-    client = create_openai_client()
-    stream = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_query},
-        ],
-        stream=True,
-    )
-    for chunk in stream:
-        content = chunk.choices[0].delta.content
-        if content:
-            yield content
+def stream_text(text: str):
+    words = text.split(" ")
+    for i, word in enumerate(words):
+        yield word + (" " if i < len(words) - 1 else "")
+        time.sleep(0.02)
 
 
 def cortex_complete_sql(session, model, prompt):
@@ -351,25 +337,20 @@ def run_query(user_query: str):
 
         system_prompt = build_system_prompt(contexts, conversation_history)
 
+        full_prompt = system_prompt + f"\n\nUser Question: {user_query}\nAnswer:"
         try:
-            response_text = st.write_stream(
-                stream_cortex_response(PRIMARY_MODEL, system_prompt, user_query)
-            )
+            response_text = cortex_complete_sql(session, PRIMARY_MODEL, full_prompt)
         except Exception as e:
-            logging.error(f"Streaming error with {PRIMARY_MODEL}: {e}")
+            logging.error(f"Primary model error: {e}")
             try:
-                response_text = st.write_stream(
-                    stream_cortex_response(FALLBACK_MODEL, system_prompt, user_query)
-                )
+                response_text = cortex_complete_sql(session, FALLBACK_MODEL, full_prompt)
             except Exception as e2:
-                logging.error(f"Streaming fallback error: {e2}")
-                try:
-                    full_prompt = system_prompt + f"\n\nUser Question: {user_query}\nAnswer:"
-                    response_text = cortex_complete_sql(session, FALLBACK_MODEL, full_prompt)
-                    st.markdown(response_text)
-                except Exception as e3:
-                    response_text = f"Unable to generate a response. Error: {e}"
-                    st.error(response_text)
+                logging.error(f"Fallback model error: {e2}")
+                response_text = f"Unable to generate a response. Error: {e}"
+                st.error(response_text)
+
+        if not response_text.startswith("Unable to generate"):
+            st.write_stream(stream_text(response_text))
 
     top_contexts = contexts[:3] if contexts else []
     st.session_state.messages.append({"role": "assistant", "content": response_text, "contexts": top_contexts})
