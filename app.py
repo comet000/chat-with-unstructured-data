@@ -4,7 +4,6 @@ import logging
 import time
 import html
 import json
-import threading
 from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -16,16 +15,10 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 
-# Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- MESSAGE MANAGEMENT HELPERS ---
 
 def get_recent_conversation_context(messages, max_pairs=2):
-    """
-    Get only the last N user/assistant pairs for conversation context.
-    Prioritize follow-up questions.
-    """
     history = []
     for msg in messages[-(max_pairs * 2):]:
         role = "User" if msg["role"] == "user" else "Assistant"
@@ -34,8 +27,6 @@ def get_recent_conversation_context(messages, max_pairs=2):
     history.sort(key=lambda x: x[1], reverse=True)
     return "\n".join(h[0] for h in history) if history else ""
 
-
-# --- SNOWFLAKE CONNECTION ---
 
 @st.cache_resource
 def create_snowflake_session():
@@ -53,7 +44,7 @@ def create_snowflake_session():
         logging.error(f"Failed to load secrets from Streamlit: {e}")
         st.error("Failed to load Snowflake credentials from secrets. Please check your Streamlit Cloud secrets configuration.")
         st.stop()
-  
+
     try:
         session = Session.builder.configs(connection_parameters).create()
         logging.info("Snowflake session created successfully")
@@ -63,8 +54,19 @@ def create_snowflake_session():
         st.error(f"Cannot connect to Snowflake: {e}. Please check credentials and try again.")
         raise
 
+
+def get_valid_session():
+    s = create_snowflake_session()
+    try:
+        s.sql("SELECT 1").collect()
+        return s
+    except Exception:
+        st.cache_resource.clear()
+        return create_snowflake_session()
+
+
 try:
-    session = create_snowflake_session()
+    session = get_valid_session()
     root = Root(session)
     search_service = (
         root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
@@ -76,20 +78,21 @@ except Exception as e:
     st.stop()
 
 
-# --- TEXT & FILE HELPERS ---
-
 def extract_target_years(query: str) -> List[int]:
     return [int(y) for y in re.findall(r"20\d{2}", query)]
+
 
 def extract_file_year(file_name: str) -> int:
     match = re.search(r"(\d{4})", file_name)
     return int(match.group(1)) if match else 0
+
 
 def clean_chunk(chunk: str) -> str:
     cleaned = re.sub(r"!\[.*?\]\(.*?\)", "", chunk)
     cleaned = re.sub(r"#{1,6}\s*", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
+
 
 def extract_clean_title(file_name: str) -> str:
     month_map = {
@@ -124,6 +127,7 @@ def extract_clean_title(file_name: str) -> str:
         doc_type = "FOMC Document"
     return f"{doc_type} - {date_str}"
 
+
 def create_direct_link(file_name: str) -> str:
     try:
         base = "https://www.federalreserve.gov"
@@ -149,8 +153,6 @@ def create_direct_link(file_name: str) -> str:
         return f"https://www.federalreserve.gov/monetarypolicy/files/{file_name.split('/')[-1]}"
 
 
-# --- RETRIEVER ---
-
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit: int = 12):
         self._session = snowpark_session
@@ -161,10 +163,10 @@ class CortexSearchRetriever:
         config = {
             "query": safe_query,
             "columns": ["CHUNK", "FILE_NAME"],
-            "limit": self._limit * 3 
+            "limit": self._limit * 3
         }
         config_json = json.dumps(config).replace("'", "''")
-        
+
         sql = f"""
             SELECT PARSE_JSON(
                 SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
@@ -173,12 +175,12 @@ class CortexSearchRetriever:
                 )
             )['results'] AS results
         """
-        
+
         try:
             df = self._session.sql(sql).collect()
             if not df:
                 return []
-            
+
             raw_results = json.loads(df[0]['RESULTS'])
             unique_docs = {}
             for r in raw_results:
@@ -188,44 +190,39 @@ class CortexSearchRetriever:
                         'chunk': r.get('CHUNK', ''),
                         'file_name': file_name
                     }
-            
+
             docs = list(unique_docs.values())
             target_years = extract_target_years(query)
             if target_years:
                 lower_year = min(target_years) - 1
                 upper_year = max(target_years)
                 docs = [d for d in docs if lower_year <= extract_file_year(d['file_name']) <= upper_year]
-            
+
             docs.sort(key=lambda d: extract_file_year(d['file_name']), reverse=True)
             return docs[:self._limit]
-            
+
         except Exception as e:
             logging.error(f"Retrieval error: {e}")
             return []
 
+
 rag_retriever = CortexSearchRetriever(session)
 
 
-# --- PROMPT & LLM COMPLETION ---
-
 def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
-    """
-    Build an optimized system prompt using XML tags and utilizing the model's full context window.
-    """
     year_buckets = {}
     for c in contexts[:3]:
         year = extract_file_year(c["file_name"])
         if year not in year_buckets:
             year_buckets[year] = []
         year_buckets[year].append(clean_chunk(c["chunk"]))
-  
+
     grouped_texts = []
     for year in sorted(year_buckets.keys()):
         grouped_texts.append(f"--- Year {year} ---\n{chr(10).join(year_buckets[year])}")
-  
+
     context_text = "\n\n".join(grouped_texts)
-  
-    # Safely cap at 40,000 characters
+
     if len(context_text) > 40000:
         context_text = context_text[:40000] + "\n[Context truncated for length]"
 
@@ -245,7 +242,7 @@ Today is {datetime.now():%B %d, %Y}.
 
 <instructions>
 1. Use ONLY the excerpts provided in the <context> tags to answer the user's question.
-2. Do not invent facts. 
+2. Do not invent facts.
 3. When relevant, cite the source document and date naturally in your response (e.g., "According to the FOMC Minutes from January 2025..." or "During Chair Powell's press conference on December 10...").
 4. If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating your assumptions.
 </instructions>
@@ -258,14 +255,12 @@ Today is {datetime.now():%B %d, %Y}.
 
 User Question: {query}
 Answer:"""
-  
+
     return prompt
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def retrieve_cached(query: str) -> List[dict]:
-    """
-    Streamlit native caching for RAG retrieval.
-    """
     if not query:
         return []
     try:
@@ -274,21 +269,17 @@ def retrieve_cached(query: str) -> List[dict]:
         logging.error(f"Retrieval error: {e}")
         return []
 
+
 def cortex_complete_sql(session, model, prompt):
-    """
-    Executes Cortex COMPLETE entirely via SQL, bypassing the REST API 403 auth issues.
-    """
     result = session.create_dataframe([('x',)], schema=['dummy']).select(
         call_function('SNOWFLAKE.CORTEX.COMPLETE', lit(model), lit(prompt)).alias('response')
     ).collect()
     return result[0]['RESPONSE']
 
 
-# --- PDF GENERATOR ---
-
 def create_pdf(messages: List[dict]) -> BytesIO:
     buffer = BytesIO()
-    
+
     now = datetime.now(ZoneInfo("America/New_York"))
     hour = now.strftime("%I").lstrip('0')
     am_pm = now.strftime("%p").lower()
@@ -297,14 +288,14 @@ def create_pdf(messages: List[dict]) -> BytesIO:
     doc = SimpleDocTemplate(buffer, pagesize=letter)
     styles = getSampleStyleSheet()
     story = []
-    
+
     story.append(Paragraph(f"Chat History - {current_time}", styles["Title"]))
     story.append(Spacer(1, 12))
-    
+
     for msg in messages:
         role = "User" if msg["role"] == "user" else "Assistant"
         content = html.escape(msg['content']).replace('\n', '<br/>')
-        
+
         p_text = f"<b>{role}:</b><br/>{content}"
         story.append(Paragraph(p_text, styles["Normal"]))
         story.append(Spacer(1, 12))
@@ -319,76 +310,44 @@ def create_pdf(messages: List[dict]) -> BytesIO:
                 story.append(Paragraph(source_text, styles["Normal"]))
                 story.append(Spacer(1, 4))
             story.append(Spacer(1, 12))
-            
+
     doc.build(story)
     buffer.seek(0)
     return buffer
 
 
-# --- CORE RUNNER ---
-
 def run_query(user_query: str):
-    start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
-  
+
     with st.chat_message("assistant", avatar="⚙️"):
-        # Initialize the real progress bar
-        progress_bar = st.progress(0, text="Retrieving context from Federal Reserve records...")
-        
-        # Retrieval
-        contexts = retrieve_cached(user_query)
-        retrieval_time = time.time() - start_time
-        progress_bar.progress(15, text="Context retrieved. Generating economic synthesis...")
-        
+        with st.spinner("Retrieving context from Federal Reserve records..."):
+            contexts = retrieve_cached(user_query)
+
         if not contexts:
             st.info("No direct context found. Answering from general macroeconomic principles.")
-            
+
         prompt = build_system_prompt(user_query, contexts, conversation_history)
-        result_container = {"text": "I apologize, but I'm having trouble generating a response right now. Please try again."}
-        
-        # Thread function to run the blocking SQL call
-        def fetch_from_snowflake():
+
+        with st.spinner("Generating economic synthesis..."):
             try:
-                result_container["text"] = cortex_complete_sql(session, "mistral-large2", prompt)
+                response_text = cortex_complete_sql(session, "mistral-large2", prompt)
             except Exception as e:
-                logging.error(f"SQL Error: {e}")
+                logging.error(f"Primary model error: {e}")
                 try:
                     fallback_prompt = build_system_prompt(user_query, contexts[:3], "")
-                    result_container["text"] = cortex_complete_sql(session, "mixtral-8x7b", fallback_prompt)
+                    response_text = cortex_complete_sql(session, "mixtral-8x7b", fallback_prompt)
                 except Exception as e2:
-                    logging.error(f"Fallback completion failed: {e2}")
+                    logging.error(f"Fallback model error: {e2}")
+                    response_text = f"Unable to generate a response. Error: {e}"
 
-        # Start the background thread
-        t = threading.Thread(target=fetch_from_snowflake)
-        t.start()
-        
-        # Animate progress bar while waiting for thread to finish
-        current_progress = 15
-        while t.is_alive():
-            if current_progress < 95:
-                current_progress += 1
-                progress_bar.progress(current_progress, text=f"Generating economic synthesis... {current_progress}%")
-            time.sleep(0.15) 
-            
-        # Complete and cleanup progress bar
-        progress_bar.progress(100, text="Complete!")
-        time.sleep(0.3) 
-        progress_bar.empty() 
-        
-        # Write response natively
-        response_text = result_container["text"]
         st.markdown(response_text)
-            
-    generation_time = time.time() - start_time - retrieval_time
-    
+
     top_contexts = contexts[:3] if contexts else []
     st.session_state.messages.append({"role": "assistant", "content": response_text, "contexts": top_contexts})
 
     if len(st.session_state.messages) > 10:
         st.session_state.messages = st.session_state.messages[-10:]
 
-
-# --- INITIAL SETUP & UI ---
 
 st.set_page_config(
     page_title="Chat with the Federal Reserve",
@@ -421,7 +380,6 @@ st.markdown(
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
 for msg in st.session_state.messages:
     if msg["role"] in ["user", "assistant"]:
         avatar = "🧑‍💻" if msg["role"] == "user" else "⚙️"
@@ -440,7 +398,7 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
                 st.markdown(f"**[{title}]({pdf_url})**")
                 st.caption(snippet)
                 st.divider()
-    
+
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🔄 Reset Chat"):
@@ -451,15 +409,13 @@ if st.session_state.messages and st.session_state.messages[-1]["role"] == "assis
         pdf_buffer = create_pdf(st.session_state.messages)
         st.download_button("💾 Download Research", pdf_buffer, "Research_Log.pdf", "application/pdf")
 
-# Chat input
 user_input = st.chat_input("Ask the Fed about policy, inflation, outlooks, insights, or history...")
 if user_input:
     st.chat_message("user", avatar="🧑‍💻").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
     run_query(user_input)
-    st.rerun() 
+    st.rerun()
 
-# Example questions in sidebar
 st.sidebar.markdown(
     """
     <h3 style='text-align: right;'>Example Questions</h3>
