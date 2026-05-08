@@ -329,8 +329,9 @@ def run_query(user_query: str):
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
 
     with st.chat_message("assistant", avatar="⚙️"):
-        with st.spinner("Retrieving context from Federal Reserve records..."):
-            contexts = retrieve_cached(user_query)
+        progress_bar = st.progress(0, text="Retrieving context from Federal Reserve records...")
+        contexts = retrieve_cached(user_query)
+        progress_bar.progress(15, text="Context retrieved. Generating economic synthesis...")
 
         if not contexts:
             st.info("No direct context found. Answering from general macroeconomic principles.")
@@ -348,6 +349,10 @@ def run_query(user_query: str):
                 logging.error(f"Fallback model error: {e2}")
                 response_text = f"Unable to generate a response. Error: {e}"
                 st.error(response_text)
+
+        progress_bar.progress(100, text="Complete!")
+        time.sleep(0.3)
+        progress_bar.empty()
 
         if not response_text.startswith("Unable to generate"):
             st.write_stream(stream_text(response_text))
