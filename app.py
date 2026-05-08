@@ -4,22 +4,19 @@ import logging
 import time
 import html
 import json
+import threading
 from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
 from snowflake.snowpark.functions import lit, call_function
 from snowflake.core import Root
-
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-PRIMARY_MODEL = "llama3.1-70b"
-FALLBACK_MODEL = "llama3.1-8b"
 
 
 def get_recent_conversation_context(messages, max_pairs=2):
@@ -58,22 +55,8 @@ def create_snowflake_session():
         st.error(f"Cannot connect to Snowflake: {e}. Please check credentials and try again.")
         raise
 
-
-def get_valid_session():
-    s = create_snowflake_session()
-    try:
-        s.sql("SELECT 1").collect()
-        return s
-    except Exception:
-        st.cache_resource.clear()
-        return create_snowflake_session()
-
-
-
-
-
 try:
-    session = get_valid_session()
+    session = create_snowflake_session()
     root = Root(session)
     search_service = (
         root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
@@ -88,18 +71,15 @@ except Exception as e:
 def extract_target_years(query: str) -> List[int]:
     return [int(y) for y in re.findall(r"20\d{2}", query)]
 
-
 def extract_file_year(file_name: str) -> int:
     match = re.search(r"(\d{4})", file_name)
     return int(match.group(1)) if match else 0
-
 
 def clean_chunk(chunk: str) -> str:
     cleaned = re.sub(r"!\[.*?\]\(.*?\)", "", chunk)
     cleaned = re.sub(r"#{1,6}\s*", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
-
 
 def extract_clean_title(file_name: str) -> str:
     month_map = {
@@ -133,7 +113,6 @@ def extract_clean_title(file_name: str) -> str:
     else:
         doc_type = "FOMC Document"
     return f"{doc_type} - {date_str}"
-
 
 def create_direct_link(file_name: str) -> str:
     try:
@@ -212,11 +191,10 @@ class CortexSearchRetriever:
             logging.error(f"Retrieval error: {e}")
             return []
 
-
 rag_retriever = CortexSearchRetriever(session)
 
 
-def build_system_prompt(contexts: List[dict], conversation_history: str = "") -> str:
+def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
     year_buckets = {}
     for c in contexts[:3]:
         year = extract_file_year(c["file_name"])
@@ -237,7 +215,7 @@ def build_system_prompt(contexts: List[dict], conversation_history: str = "") ->
     if conversation_history:
         history_section = f"<conversation_history>\n{conversation_history}\n</conversation_history>"
 
-    return f"""You are an expert economic analyst specializing in Federal Reserve communications.
+    prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
 Today is {datetime.now():%B %d, %Y}.
 
 <glossary>
@@ -258,8 +236,12 @@ Today is {datetime.now():%B %d, %Y}.
 {context_text}
 </context>
 
-{history_section}"""
+{history_section}
 
+User Question: {query}
+Answer:"""
+
+    return prompt
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def retrieve_cached(query: str) -> List[dict]:
@@ -270,14 +252,6 @@ def retrieve_cached(query: str) -> List[dict]:
     except Exception as e:
         logging.error(f"Retrieval error: {e}")
         return []
-
-
-def stream_text(text: str):
-    words = text.split(" ")
-    for i, word in enumerate(words):
-        yield word + (" " if i < len(words) - 1 else "")
-        time.sleep(0.02)
-
 
 def cortex_complete_sql(session, model, prompt):
     result = session.create_dataframe([('x',)], schema=['dummy']).select(
@@ -326,36 +300,58 @@ def create_pdf(messages: List[dict]) -> BytesIO:
 
 
 def run_query(user_query: str):
+    start_time = time.time()
     conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
 
     with st.chat_message("assistant", avatar="⚙️"):
         progress_bar = st.progress(0, text="Retrieving context from Federal Reserve records...")
+
         contexts = retrieve_cached(user_query)
+        retrieval_time = time.time() - start_time
         progress_bar.progress(15, text="Context retrieved. Generating economic synthesis...")
 
         if not contexts:
             st.info("No direct context found. Answering from general macroeconomic principles.")
 
-        system_prompt = build_system_prompt(contexts, conversation_history)
+        prompt = build_system_prompt(user_query, contexts, conversation_history)
+        result_container = {"text": "", "error": ""}
 
-        full_prompt = system_prompt + f"\n\nUser Question: {user_query}\nAnswer:"
-        try:
-            response_text = cortex_complete_sql(session, PRIMARY_MODEL, full_prompt)
-        except Exception as e:
-            logging.error(f"Primary model error: {e}")
+        def fetch_from_snowflake():
             try:
-                response_text = cortex_complete_sql(session, FALLBACK_MODEL, full_prompt)
-            except Exception as e2:
-                logging.error(f"Fallback model error: {e2}")
-                response_text = f"Unable to generate a response. Error: {e}"
-                st.error(response_text)
+                result_container["text"] = cortex_complete_sql(session, "llama3.1-70b", prompt)
+            except Exception as e:
+                logging.error(f"Primary model error: {e}")
+                result_container["error"] = str(e)
+                try:
+                    fallback_prompt = build_system_prompt(user_query, contexts[:3], "")
+                    result_container["text"] = cortex_complete_sql(session, "llama3.1-8b", fallback_prompt)
+                    result_container["error"] = ""
+                except Exception as e2:
+                    logging.error(f"Fallback completion failed: {e2}")
+                    result_container["error"] = str(e2)
+
+        t = threading.Thread(target=fetch_from_snowflake)
+        t.start()
+
+        current_progress = 15
+        while t.is_alive():
+            if current_progress < 95:
+                current_progress += 1
+                progress_bar.progress(current_progress, text=f"Generating economic synthesis... {current_progress}%")
+            time.sleep(0.15)
 
         progress_bar.progress(100, text="Complete!")
         time.sleep(0.3)
         progress_bar.empty()
 
-        if not response_text.startswith("Unable to generate"):
-            st.write_stream(stream_text(response_text))
+        if result_container["error"]:
+            response_text = f"Unable to generate a response. Error: {result_container['error']}"
+            st.error(response_text)
+        else:
+            response_text = result_container["text"]
+            st.markdown(response_text)
+
+    generation_time = time.time() - start_time - retrieval_time
 
     top_contexts = contexts[:3] if contexts else []
     st.session_state.messages.append({"role": "assistant", "content": response_text, "contexts": top_contexts})
@@ -429,6 +425,7 @@ if user_input:
     st.chat_message("user", avatar="🧑‍💻").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
     run_query(user_input)
+    st.rerun()
 
 st.sidebar.markdown(
     """
@@ -456,3 +453,4 @@ for question in example_questions:
         st.chat_message("user", avatar="🧑‍💻").write(question)
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
+        st.rerun()
