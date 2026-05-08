@@ -72,7 +72,8 @@ def get_valid_session():
 def create_openai_client():
     account = st.secrets["account"]
     pat = st.secrets["snowflake_pat"]
-    base_url = f"https://{account}.snowflakecomputing.com/api/v2/cortex/v1"
+    host = st.secrets.get("host", f"{account}.snowflakecomputing.com")
+    base_url = f"https://{host}/api/v2/cortex/v1"
     return OpenAI(api_key=pat, base_url=base_url)
 
 
@@ -442,7 +443,6 @@ if user_input:
     st.chat_message("user", avatar="🧑‍💻").write(user_input)
     st.session_state.messages.append({"role": "user", "content": user_input, "contexts": []})
     run_query(user_input)
-    st.rerun()
 
 st.sidebar.markdown(
     """
@@ -470,4 +470,3 @@ for question in example_questions:
         st.chat_message("user", avatar="🧑‍💻").write(question)
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
-        st.rerun()
