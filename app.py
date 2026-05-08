@@ -318,7 +318,7 @@ def run_query(user_query: str):
 
         def fetch_from_snowflake():
             try:
-                result_container["text"] = cortex_complete_sql(session, "llama3.1-70b", prompt)
+                result_container["text"] = cortex_complete_sql(session, "mixtral-8x7b", prompt)
             except Exception as e:
                 logging.error(f"Primary model error: {e}")
                 result_container["error"] = str(e)
