@@ -144,6 +144,12 @@ class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit: int = 12):
         self._session = snowpark_session
         self._limit = limit
+        self._root = Root(snowpark_session)
+        self._search_service = (
+            self._root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
+            .schemas["PUBLIC"]
+            .cortex_search_services["FOMC_SEARCH_SERVICE"]
+        )
 
     def retrieve(self, query: str) -> List[Dict[str, Any]]:
         query_tfidf = tfidf_vectorizer.transform([query])
@@ -151,37 +157,24 @@ class CortexSearchRetriever:
         query_norm = np.linalg.norm(query_vec)
         if query_norm > 0:
             query_vec = query_vec / query_norm
-        vec_list = query_vec[0].tolist()
-
-        config = {
-            "multi_index_query": {
-                "chunk": [{"text": query}],
-                "chunk_embedding": [{"vector": vec_list}]
-            },
-            "columns": ["CHUNK", "FILE_NAME"],
-            "limit": self._limit * 3
-        }
-        config_json = json.dumps(config).replace("'", "''")
-
-        sql = f"""
-            SELECT PARSE_JSON(
-                SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-                    'CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.FOMC_SEARCH_SERVICE',
-                    '{config_json}'
-                )
-            )['results'] AS results
-        """
 
         try:
-            df = self._session.sql(sql).collect()
-            if not df or df[0]['RESULTS'] is None:
+            resp = self._search_service.search(
+                multi_index_query={
+                    "chunk": [{"text": query}],
+                    "chunk_embedding": [{"vector": query_vec[0].tolist()}]
+                },
+                columns=["chunk", "file_name"],
+                limit=self._limit * 3
+            )
+
+            if not resp.results:
                 return []
 
-            raw_results = json.loads(df[0]['RESULTS'])
             unique_docs = {}
-            for r in raw_results:
-                file_name = r.get('FILE_NAME', '')
-                chunk = r.get('CHUNK', '')
+            for r in resp.results:
+                file_name = r.get('file_name', '')
+                chunk = r.get('chunk', '')
                 if file_name and file_name not in unique_docs and len(chunk) > 50:
                     unique_docs[file_name] = {
                         'chunk': chunk,
