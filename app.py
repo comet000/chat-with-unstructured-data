@@ -4,12 +4,10 @@ import logging
 import time
 import html
 import json
-import threading
 from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from snowflake.snowpark import Session
-from snowflake.snowpark.functions import lit, call_function
 from snowflake.core import Root
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -17,16 +15,6 @@ from reportlab.lib.styles import getSampleStyleSheet
 from io import BytesIO
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-def get_recent_conversation_context(messages, max_pairs=2):
-    history = []
-    for msg in messages[-(max_pairs * 2):]:
-        role = "User" if msg["role"] == "user" else "Assistant"
-        weight = 1.5 if msg["content"].lower().startswith(("why", "how", "what")) else 1.0
-        history.append((f"{role}: {msg['content']}", weight))
-    history.sort(key=lambda x: x[1], reverse=True)
-    return "\n".join(h[0] for h in history) if history else ""
 
 
 @st.cache_resource
@@ -94,13 +82,13 @@ def extract_clean_title(file_name: str) -> str:
     else:
         date_str = "Unknown Date"
     fname = file_name.lower()
-    if "beigebook" in fname or "beigebook_" in fname:
+    if "beigebook" in fname:
         doc_type = "Beige Book"
-    elif "longerungoals" in fname or "fomc_longerungoals" in fname:
+    elif "longerungoals" in fname:
         doc_type = "FOMC Longer-Run Goals"
-    elif "presconf" in fname or "fomcpresconf" in fname:
+    elif "presconf" in fname:
         doc_type = "Press Conference"
-    elif "projtabl" in fname or "fomcprojtabl" in fname:
+    elif "projtabl" in fname:
         doc_type = "Projection Tables"
     elif "mprfullreport" in fname or "mpr" in fname:
         doc_type = "Monetary Policy Report"
@@ -108,7 +96,7 @@ def extract_clean_title(file_name: str) -> str:
         doc_type = "Monetary Document"
     elif "financial-stability-report" in fname or "financial" in fname:
         doc_type = "Financial Stability Report"
-    elif "minutes" in fname or "fomcminutes" in fname:
+    elif "minutes" in fname:
         doc_type = "FOMC Minutes"
     else:
         doc_type = "FOMC Document"
@@ -194,54 +182,51 @@ class CortexSearchRetriever:
 rag_retriever = CortexSearchRetriever(session)
 
 
-def build_system_prompt(query: str, contexts: List[dict], conversation_history: str = "") -> str:
-    year_buckets = {}
-    for c in contexts[:3]:
-        year = extract_file_year(c["file_name"])
-        if year not in year_buckets:
-            year_buckets[year] = []
-        year_buckets[year].append(clean_chunk(c["chunk"]))
+def extractive_answer(query: str, contexts: List[dict]) -> str:
+    stop_words = {'the', 'a', 'an', 'in', 'is', 'was', 'how', 'to', 'of', 'and',
+                  'for', 'on', 'with', 'that', 'it', 'are', 'be', 'this', 'at', 'by',
+                  'do', 'did', 'does', 'what', 'when', 'where', 'which', 'who', 'will'}
+    query_words = set(re.findall(r'\w+', query.lower())) - stop_words
 
-    grouped_texts = []
-    for year in sorted(year_buckets.keys()):
-        grouped_texts.append(f"--- Year {year} ---\n{chr(10).join(year_buckets[year])}")
+    all_sentences = []
+    for ctx in contexts:
+        chunk = clean_chunk(ctx.get('chunk', ''))
+        sentences = re.split(r'(?<=[.!?])\s+', chunk)
+        for sent in sentences:
+            if len(sent.strip()) >= 40:
+                all_sentences.append((sent.strip(), ctx.get('file_name', '')))
 
-    context_text = "\n\n".join(grouped_texts)
+    scored = []
+    for sent, file_name in all_sentences:
+        sent_words = set(re.findall(r'\w+', sent.lower()))
+        overlap = len(query_words & sent_words)
+        score = overlap / max(len(query_words), 1)
+        scored.append((score, sent, file_name))
 
-    if len(context_text) > 12000:
-        context_text = context_text[:12000] + "\n[Context truncated for length]"
+    scored.sort(key=lambda x: -x[0])
 
-    history_section = ""
-    if conversation_history:
-        history_section = f"<conversation_history>\n{conversation_history}\n</conversation_history>"
+    seen = set()
+    top = []
+    for score, sent, file_name in scored:
+        if score < 0.1:
+            break
+        normalized = re.sub(r'\s+', ' ', sent.lower()[:80])
+        if normalized not in seen:
+            seen.add(normalized)
+            top.append((sent, file_name))
+        if len(top) >= 8:
+            break
 
-    prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
-Today is {datetime.now():%B %d, %Y}.
+    if not top:
+        return "No relevant information found in the available Federal Reserve documents for this query."
 
-<glossary>
-- Dot Plot: A chart showing each FOMC participant's forecast for the federal funds rate.
-- Longer-run Inflation Expectations: Fed members' inflation expectations beyond the near-term future.
-- Beige Book: A report summarizing economic conditions across Fed districts, published 8 times/year.
-- Federal Funds Rate Target: The interest rate that the Fed targets for overnight lending between banks.
-</glossary>
+    result_parts = []
+    for sent, file_name in top:
+        title = extract_clean_title(file_name)
+        result_parts.append(f"• {sent}\n  *— {title}*")
 
-<instructions>
-1. Use ONLY the excerpts provided in the <context> tags to answer the user's question.
-2. Do not invent facts.
-3. When relevant, cite the source document and date naturally in your response (e.g., "According to the FOMC Minutes from January 2025..." or "During Chair Powell's press conference on December 10...").
-4. If no direct context is available, provide a partial answer based on related information from other years or documents, clearly stating your assumptions.
-</instructions>
+    return "\n\n".join(result_parts)
 
-<context>
-{context_text}
-</context>
-
-{history_section}
-
-User Question: {query}
-Answer:"""
-
-    return prompt
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def retrieve_cached(query: str) -> List[dict]:
@@ -252,12 +237,6 @@ def retrieve_cached(query: str) -> List[dict]:
     except Exception as e:
         logging.error(f"Retrieval error: {e}")
         return []
-
-def cortex_complete_sql(session, model, prompt):
-    result = session.create_dataframe([('x',)], schema=['dummy']).select(
-        call_function('SNOWFLAKE.CORTEX.COMPLETE', lit(model), lit(prompt)).alias('response')
-    ).collect()
-    return result[0]['RESPONSE']
 
 
 def create_pdf(messages: List[dict]) -> BytesIO:
@@ -300,58 +279,22 @@ def create_pdf(messages: List[dict]) -> BytesIO:
 
 
 def run_query(user_query: str):
-    start_time = time.time()
-    conversation_history = get_recent_conversation_context(st.session_state.messages, max_pairs=2)
-
     with st.chat_message("assistant", avatar="⚙️"):
         progress_bar = st.progress(0, text="Retrieving context from Federal Reserve records...")
 
         contexts = retrieve_cached(user_query)
-        retrieval_time = time.time() - start_time
-        progress_bar.progress(15, text="Context retrieved. Generating economic synthesis...")
+        progress_bar.progress(50, text="Extracting relevant information...")
 
         if not contexts:
-            st.info("No direct context found. Answering from general macroeconomic principles.")
-
-        prompt = build_system_prompt(user_query, contexts, conversation_history)
-        result_container = {"text": "", "error": ""}
-
-        def fetch_from_snowflake():
-            try:
-                result_container["text"] = cortex_complete_sql(session, "claude-haiku-4-5", prompt)
-            except Exception as e:
-                logging.error(f"Primary model error: {e}")
-                result_container["error"] = str(e)
-                try:
-                    fallback_prompt = build_system_prompt(user_query, contexts[:3], "")
-                    result_container["text"] = cortex_complete_sql(session, "mistral-large2", fallback_prompt)
-                    result_container["error"] = ""
-                except Exception as e2:
-                    logging.error(f"Fallback completion failed: {e2}")
-                    result_container["error"] = str(e2)
-
-        t = threading.Thread(target=fetch_from_snowflake)
-        t.start()
-
-        current_progress = 15
-        while t.is_alive():
-            if current_progress < 95:
-                current_progress += 1
-                progress_bar.progress(current_progress, text=f"Generating economic synthesis... {current_progress}%")
-            time.sleep(0.15)
+            response_text = "No relevant documents found for this query. Please try rephrasing or check https://www.federalreserve.gov."
+        else:
+            response_text = extractive_answer(user_query, contexts)
 
         progress_bar.progress(100, text="Complete!")
         time.sleep(0.3)
         progress_bar.empty()
 
-        if result_container["error"]:
-            response_text = f"Unable to generate a response. Error: {result_container['error']}"
-            st.error(response_text)
-        else:
-            response_text = result_container["text"]
-            st.markdown(response_text)
-
-    generation_time = time.time() - start_time - retrieval_time
+        st.markdown(response_text)
 
     top_contexts = contexts[:3] if contexts else []
     st.session_state.messages.append({"role": "assistant", "content": response_text, "contexts": top_contexts})
