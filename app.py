@@ -8,6 +8,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import numpy as np
+import requests
 from snowflake.snowpark import Session
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -144,12 +145,14 @@ class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit: int = 12):
         self._session = snowpark_session
         self._limit = limit
-        self._root = Root(snowpark_session)
-        self._search_service = (
-            self._root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-            .schemas["PUBLIC"]
-            .cortex_search_services["FOMC_SEARCH_SERVICE"]
+        self._service_url = (
+            "https://rubuuix-ag35068.us-east-2.aws.snowflakecomputing.com"
+            "/api/v2/databases/CORTEX_SEARCH_TUTORIAL_DB/schemas/PUBLIC"
+            "/cortex-search-services/FOMC_SEARCH_SERVICE:query"
         )
+
+    def _get_token(self):
+        return self._session.connection.rest.token
 
     def retrieve(self, query: str) -> List[Dict[str, Any]]:
         query_tfidf = tfidf_vectorizer.transform([query])
@@ -158,21 +161,31 @@ class CortexSearchRetriever:
         if query_norm > 0:
             query_vec = query_vec / query_norm
 
-        try:
-            resp = self._search_service.search(
-                multi_index_query={
-                    "chunk": [{"text": query}],
-                    "chunk_embedding": [{"vector": query_vec[0].tolist()}]
-                },
-                columns=["chunk", "file_name"],
-                limit=self._limit * 3
-            )
+        payload = {
+            "multi_index_query": {
+                "chunk": [{"text": query}],
+                "chunk_embedding": [{"vector": query_vec[0].tolist()}]
+            },
+            "columns": ["chunk", "file_name"],
+            "limit": self._limit * 3
+        }
 
-            if not resp.results:
+        try:
+            token = self._get_token()
+            headers = {
+                "Authorization": f"Snowflake Token=\"{token}\"",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+            resp = requests.post(self._service_url, json=payload, headers=headers, timeout=30)
+            resp.raise_for_status()
+            results = resp.json().get("results", [])
+
+            if not results:
                 return []
 
             unique_docs = {}
-            for r in resp.results:
+            for r in results:
                 file_name = r.get('file_name', '')
                 chunk = r.get('chunk', '')
                 if file_name and file_name not in unique_docs and len(chunk) > 50:
