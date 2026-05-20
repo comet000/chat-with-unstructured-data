@@ -127,8 +127,16 @@ def build_tfidf_model():
     from sklearn.feature_extraction.text import TfidfVectorizer
     from sklearn.decomposition import TruncatedSVD
 
-    rows = session.sql("SELECT chunk FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_CONTENT WHERE LENGTH(chunk) > 50").collect()
-    chunks = [row['CHUNK'] for row in rows]
+    try:
+        rows = session.sql("SELECT chunk FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_CONTENT WHERE LENGTH(chunk) > 50").collect()
+        chunks = [row['CHUNK'] for row in rows]
+        logging.info(f"TF-IDF model: loaded {len(chunks)} chunks")
+        if not chunks:
+            st.error("DEBUG: No chunks found in CHUNKED_FOMC_CONTENT table. Check table access for streamlit_readonly_role.")
+            return None, None
+    except Exception as e:
+        st.error(f"DEBUG: Failed to load chunks: {e}")
+        return None, None
 
     vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
     tfidf_matrix = vectorizer.fit_transform(chunks)
@@ -152,7 +160,19 @@ class CortexSearchRetriever:
         )
 
     def _get_token(self):
-        return self._session.connection.rest.token
+        try:
+            token = self._session.connection.rest.token
+            logging.info(f"Got token: {token[:20]}...")
+            return token
+        except AttributeError:
+            try:
+                token = self._session._conn._conn.rest.token
+                logging.info(f"Got token via _conn: {token[:20]}...")
+                return token
+            except Exception as e2:
+                logging.error(f"Token extraction failed: {e2}")
+                st.error(f"DEBUG: Cannot extract auth token: {e2}")
+                raise
 
     def retrieve(self, query: str) -> List[Dict[str, Any]]:
         query_tfidf = tfidf_vectorizer.transform([query])
@@ -206,6 +226,7 @@ class CortexSearchRetriever:
 
         except Exception as e:
             logging.error(f"Retrieval error: {e}")
+            st.error(f"DEBUG Retrieval error: {e}")
             return []
 
 rag_retriever = CortexSearchRetriever(session)
