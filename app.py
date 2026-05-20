@@ -7,6 +7,7 @@ import json
 from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import numpy as np
 from snowflake.snowpark import Session
 from snowflake.core import Root
 from reportlab.lib.pagesizes import letter
@@ -45,12 +46,6 @@ def create_snowflake_session():
 
 try:
     session = create_snowflake_session()
-    root = Root(session)
-    search_service = (
-        root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
-        .schemas["PUBLIC"]
-        .cortex_search_services["FOMC_SEARCH_SERVICE"]
-    )
 except Exception as e:
     st.error("Failed to initialize Snowflake connection. Please check logs and secrets configuration.")
     st.stop()
@@ -127,41 +122,66 @@ def create_direct_link(file_name: str) -> str:
         return f"https://www.federalreserve.gov/monetarypolicy/files/{file_name.split('/')[-1]}"
 
 
+@st.cache_resource
+def build_tfidf_model():
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.decomposition import TruncatedSVD
+    import numpy as np
+
+    rows = session.sql("SELECT chunk FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_CONTENT WHERE LENGTH(chunk) > 50").collect()
+    chunks = [row['CHUNK'] for row in rows]
+
+    vectorizer = TfidfVectorizer(max_features=5000, stop_words='english')
+    tfidf_matrix = vectorizer.fit_transform(chunks)
+
+    svd = TruncatedSVD(n_components=384, random_state=42)
+    svd.fit(tfidf_matrix)
+
+    return vectorizer, svd
+
+tfidf_vectorizer, tfidf_svd = build_tfidf_model()
+
+
 class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit: int = 12):
         self._session = snowpark_session
         self._limit = limit
+        self._root = Root(snowpark_session)
+        self._search_service = (
+            self._root.databases["CORTEX_SEARCH_TUTORIAL_DB"]
+            .schemas["PUBLIC"]
+            .cortex_search_services["FOMC_SEARCH_SERVICE"]
+        )
 
     def retrieve(self, query: str) -> List[Dict[str, Any]]:
-        safe_query = query.replace("'", "''")
-        config = {
-            "query": safe_query,
-            "columns": ["CHUNK", "FILE_NAME"],
-            "limit": self._limit * 3
-        }
-        config_json = json.dumps(config).replace("'", "''")
+        import numpy as np
 
-        sql = f"""
-            SELECT PARSE_JSON(
-                SNOWFLAKE.CORTEX.SEARCH_PREVIEW(
-                    'CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.FOMC_SEARCH_SERVICE',
-                    '{config_json}'
-                )
-            )['results'] AS results
-        """
+        query_tfidf = tfidf_vectorizer.transform([query])
+        query_vec = tfidf_svd.transform(query_tfidf)
+        query_norm = np.linalg.norm(query_vec)
+        if query_norm > 0:
+            query_vec = query_vec / query_norm
 
         try:
-            df = self._session.sql(sql).collect()
-            if not df:
+            resp = self._search_service.search(
+                multi_index_query={
+                    "chunk": [{"text": query}],
+                    "chunk_embedding": [{"vector": query_vec[0].tolist()}]
+                },
+                columns=["chunk", "file_name"],
+                limit=self._limit * 3
+            )
+
+            if not resp.results:
                 return []
 
-            raw_results = json.loads(df[0]['RESULTS'])
             unique_docs = {}
-            for r in raw_results:
-                file_name = r.get('FILE_NAME', '')
-                if file_name and file_name not in unique_docs:
+            for r in resp.results:
+                file_name = r.get('file_name', '')
+                chunk = r.get('chunk', '')
+                if file_name and file_name not in unique_docs and len(chunk) > 50:
                     unique_docs[file_name] = {
-                        'chunk': r.get('CHUNK', ''),
+                        'chunk': chunk,
                         'file_name': file_name
                     }
 
