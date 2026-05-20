@@ -1,7 +1,6 @@
 streamlit
-snowflake
 snowflake-snowpark-python
-snowflake-ml-python
-cachetools
+snowflake
+scikit-learn
+numpy
 reportlab
-openai
