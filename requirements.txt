@@ -1,6 +1,6 @@
 streamlit
-snowflake-snowpark-python
-snowflake
+snowflake-snowpark-python[pandas]
 scikit-learn
 numpy
 reportlab
+requests
