@@ -156,8 +156,8 @@ class CortexSearchRetriever:
         self._limit = limit
         self._service_url = (
             "https://rubuuix-ag35068.us-east-2.aws.snowflakecomputing.com"
-            "/api/v2/databases/CORTEX_SEARCH_TUTORIAL_DB/schemas/PUBLIC"
-            "/cortex-search-services/FOMC_SEARCH_SERVICE:query"
+            "/api/v2/databases/cortex_search_tutorial_db/schemas/public"
+            "/cortex-search-services/fomc_search_service:query"
         )
 
     def _get_token(self):
