@@ -1,4 +1,11 @@
 import streamlit as st
+
+st.set_page_config(
+    page_title="Chat with the Federal Reserve",
+    page_icon="🏛️",
+    layout="centered"
+)
+
 import re
 import logging
 import time
@@ -161,16 +168,12 @@ class CortexSearchRetriever:
         if query_norm > 0:
             query_vec = query_vec / query_norm
 
-        vec_str = ",".join(str(v) for v in query_vec[0].tolist())
+        vec_str = "[" + ",".join(str(v) for v in query_vec[0].tolist()) + "]"
 
         sql = f"""
-            WITH query_vec AS (
-                SELECT {vec_str}::VECTOR(FLOAT, 384) AS qv
-            )
             SELECT t.file_name, t.chunk,
-                VECTOR_COSINE_SIMILARITY(t.chunk_embedding, q.qv) AS score
-            FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_WITH_EMBEDDINGS t,
-                query_vec q
+                VECTOR_COSINE_SIMILARITY(t.chunk_embedding, {vec_str}::VECTOR(FLOAT, 384)) AS score
+            FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_WITH_EMBEDDINGS t
             WHERE LENGTH(t.chunk) > 50
             ORDER BY score DESC
             LIMIT {self._limit * 3}
@@ -330,11 +333,6 @@ def run_query(user_query: str):
         st.session_state.messages = st.session_state.messages[-10:]
 
 
-st.set_page_config(
-    page_title="Chat with the Federal Reserve",
-    page_icon="🏛️",
-    layout="centered"
-)
 
 st.markdown(
     """
