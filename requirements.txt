@@ -3,4 +3,3 @@ snowflake-snowpark-python[pandas]
 scikit-learn
 numpy
 reportlab
-requests
