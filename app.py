@@ -1,13 +1,3 @@
-import streamlit as st
-
-st.set_page_config(
-    page_title="Chat with the Federal Reserve",
-    page_icon="🏛️",
-    layout="centered"
-)
-
-import re
-import logging
 import time
 import html
 import json
@@ -171,13 +161,32 @@ class CortexSearchRetriever:
 
         vec_str = "[" + ",".join(str(v) for v in query_vec[0].tolist()) + "]"
 
+        keywords = [w for w in re.findall(r'\w+', query.lower()) if len(w) > 3 and w not in
+                    {'what', 'will', 'were', 'that', 'this', 'they', 'their', 'there',
+                     'have', 'been', 'from', 'with', 'over', 'next', 'does', 'about',
+                     'how', 'many', 'much', 'some', 'which', 'would', 'could', 'should'}]
+
+        keyword_conditions = " OR ".join(
+            f"LOWER(t.chunk) LIKE '%{kw}%'" for kw in keywords[:6]
+        )
+
         sql = f"""
-            SELECT t.file_name, t.chunk,
-                VECTOR_COSINE_SIMILARITY(t.chunk_embedding, {vec_str}::VECTOR(FLOAT, 384)) AS score
-            FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_WITH_EMBEDDINGS t
-            WHERE LENGTH(t.chunk) > 50
+            SELECT file_name, chunk, score FROM (
+                SELECT t.file_name, t.chunk,
+                    VECTOR_COSINE_SIMILARITY(t.chunk_embedding, {vec_str}::VECTOR(FLOAT, 384)) AS score
+                FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_WITH_EMBEDDINGS t
+                WHERE LENGTH(t.chunk) > 50
+                ORDER BY score DESC
+                LIMIT {self._limit * 2}
+            )
+            UNION
+            SELECT file_name, chunk, 0.5 as score FROM (
+                SELECT t.file_name, t.chunk
+                FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_WITH_EMBEDDINGS t
+                WHERE LENGTH(t.chunk) > 50 AND ({keyword_conditions})
+                LIMIT {self._limit * 2}
+            )
             ORDER BY score DESC
-            LIMIT {self._limit * 3}
         """
 
         try:
@@ -230,8 +239,12 @@ def groq_complete(query: str, contexts: List[dict]) -> str:
     system_prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
 Today is {datetime.now():%B %d, %Y}.
 
-Use ONLY the context below to answer the user's question. Cite sources naturally.
-If the context doesn't contain relevant information, say so clearly.
+INSTRUCTIONS:
+1. Answer the question using ONLY the context provided below.
+2. Cite specific documents and dates when referencing information.
+3. If the context contains relevant information, provide a thorough, well-organized answer.
+4. If the context does NOT contain information to answer the question, say "The available Fed documents do not directly address this topic" — do NOT make up information or provide general knowledge.
+5. Never fabricate facts or cite external sources not in the context.
 
 Context:
 {context_text}"""
@@ -244,7 +257,7 @@ Context:
                 "Content-Type": "application/json"
             },
             json={
-                "model": "llama-3.1-8b-instant",
+                "model": "llama-3.3-70b-versatile",
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": query}
