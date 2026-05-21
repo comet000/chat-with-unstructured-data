@@ -171,14 +171,30 @@ class CortexSearchRetriever:
 
         vec_str = "[" + ",".join(str(v) for v in query_vec[0].tolist()) + "]"
 
-        keywords = [w for w in re.findall(r'\w+', query.lower()) if len(w) > 3 and w not in
+        keywords = [w for w in re.findall(r'\w+', query.lower()) if w not in
                     {'what', 'will', 'were', 'that', 'this', 'they', 'their', 'there',
                      'have', 'been', 'from', 'with', 'over', 'next', 'does', 'about',
-                     'how', 'many', 'much', 'some', 'which', 'would', 'could', 'should'}]
+                     'how', 'many', 'much', 'some', 'which', 'would', 'could', 'should',
+                     'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can',
+                     'her', 'was', 'one', 'our', 'out', 'its'}]
+        keywords = [w for w in keywords if len(w) > 3 or w in {'ai', 'fed', 'gdp', 'job', 'tax', 'oil', 'war'}]
 
-        keyword_conditions = " OR ".join(
-            f"LOWER(t.chunk) LIKE '%{kw}%'" for kw in keywords[:6]
-        )
+        like_terms = []
+        for kw in keywords[:8]:
+            if len(kw) <= 3:
+                like_terms.append(f"LOWER(t.chunk) LIKE '% {kw} %'")
+            else:
+                like_terms.append(f"LOWER(t.chunk) LIKE '%{kw}%'")
+
+        query_lower = query.lower()
+        bigrams = ['artificial intelligence', 'wage growth', 'labor market', 'labor demand',
+                   'financial stability', 'interest rate', 'federal funds', 'supply chain',
+                   'price stability', 'monetary policy', 'economic outlook', 'inflation expectations']
+        for bg in bigrams:
+            if bg in query_lower:
+                like_terms.append(f"LOWER(t.chunk) LIKE '%{bg}%'")
+
+        keyword_conditions = " OR ".join(like_terms) if like_terms else "1=0"
 
         sql = f"""
             SELECT file_name, chunk, score FROM (
