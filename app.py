@@ -206,11 +206,11 @@ class CortexSearchRetriever:
                 LIMIT {self._limit * 2}
             )
             UNION
-            SELECT file_name, chunk, 0.5 as score FROM (
+            SELECT file_name, chunk, 0.9 as score FROM (
                 SELECT t.file_name, t.chunk
                 FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_WITH_EMBEDDINGS t
                 WHERE LENGTH(t.chunk) > 50 AND ({keyword_conditions})
-                LIMIT {self._limit * 2}
+                LIMIT {self._limit * 3}
             )
             ORDER BY score DESC
         """
@@ -220,24 +220,25 @@ class CortexSearchRetriever:
             if not df:
                 return []
 
-            unique_docs = {}
+            docs = []
+            seen_chunks = set()
             for r in df:
                 file_name = r['FILE_NAME']
                 chunk = r['CHUNK']
-                if file_name and file_name not in unique_docs:
-                    unique_docs[file_name] = {
+                chunk_key = chunk[:100]
+                if chunk_key not in seen_chunks:
+                    seen_chunks.add(chunk_key)
+                    docs.append({
                         'chunk': chunk,
                         'file_name': file_name
-                    }
+                    })
 
-            docs = list(unique_docs.values())
             target_years = extract_target_years(query)
             if target_years:
                 lower_year = min(target_years) - 1
                 upper_year = max(target_years)
                 docs = [d for d in docs if lower_year <= extract_file_year(d['file_name']) <= upper_year]
 
-            docs.sort(key=lambda d: extract_file_year(d['file_name']), reverse=True)
             return docs[:self._limit]
 
         except Exception as e:
@@ -253,7 +254,7 @@ GROQ_API_KEY = st.secrets.get("groq_api_key", "")
 
 def groq_complete(query: str, contexts: List[dict]) -> str:
     context_parts = []
-    for ctx in contexts[:5]:
+    for ctx in contexts[:8]:
         chunk = clean_chunk(ctx.get('chunk', ''))
         title = extract_clean_title(ctx.get('file_name', ''))
         context_parts.append(f"[Source: {title}]\n{chunk}")
