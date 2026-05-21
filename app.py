@@ -8,7 +8,6 @@ from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import numpy as np
-import requests
 from snowflake.snowpark import Session
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -154,26 +153,6 @@ class CortexSearchRetriever:
     def __init__(self, snowpark_session: Session, limit: int = 12):
         self._session = snowpark_session
         self._limit = limit
-        self._service_url = (
-            "https://rubuuix-ag35068.us-east-2.aws.snowflakecomputing.com"
-            "/api/v2/databases/cortex_search_tutorial_db/schemas/public"
-            "/cortex-search-services/fomc_search_service:query"
-        )
-
-    def _get_token(self):
-        try:
-            token = self._session.connection.rest.token
-            logging.info(f"Got token: {token[:20]}...")
-            return token
-        except AttributeError:
-            try:
-                token = self._session._conn._conn.rest.token
-                logging.info(f"Got token via _conn: {token[:20]}...")
-                return token
-            except Exception as e2:
-                logging.error(f"Token extraction failed: {e2}")
-                st.error(f"DEBUG: Cannot extract auth token: {e2}")
-                raise
 
     def retrieve(self, query: str) -> List[Dict[str, Any]]:
         query_tfidf = tfidf_vectorizer.transform([query])
@@ -182,34 +161,31 @@ class CortexSearchRetriever:
         if query_norm > 0:
             query_vec = query_vec / query_norm
 
-        payload = {
-            "multi_index_query": {
-                "chunk": [{"text": query}],
-                "chunk_embedding": [{"vector": query_vec[0].tolist()}]
-            },
-            "columns": ["chunk", "file_name"],
-            "limit": self._limit * 3
-        }
+        vec_str = ",".join(str(v) for v in query_vec[0].tolist())
+
+        sql = f"""
+            WITH query_vec AS (
+                SELECT {vec_str}::VECTOR(FLOAT, 384) AS qv
+            )
+            SELECT t.file_name, t.chunk,
+                VECTOR_COSINE_SIMILARITY(t.chunk_embedding, q.qv) AS score
+            FROM CORTEX_SEARCH_TUTORIAL_DB.PUBLIC.CHUNKED_FOMC_WITH_EMBEDDINGS t,
+                query_vec q
+            WHERE LENGTH(t.chunk) > 50
+            ORDER BY score DESC
+            LIMIT {self._limit * 3}
+        """
 
         try:
-            token = self._get_token()
-            headers = {
-                "Authorization": f"Snowflake Token=\"{token}\"",
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-            resp = requests.post(self._service_url, json=payload, headers=headers, timeout=30)
-            resp.raise_for_status()
-            results = resp.json().get("results", [])
-
-            if not results:
+            df = self._session.sql(sql).collect()
+            if not df:
                 return []
 
             unique_docs = {}
-            for r in results:
-                file_name = r.get('file_name', '')
-                chunk = r.get('chunk', '')
-                if file_name and file_name not in unique_docs and len(chunk) > 50:
+            for r in df:
+                file_name = r['FILE_NAME']
+                chunk = r['CHUNK']
+                if file_name and file_name not in unique_docs:
                     unique_docs[file_name] = {
                         'chunk': chunk,
                         'file_name': file_name
