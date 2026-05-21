@@ -267,11 +267,13 @@ def groq_complete(query: str, contexts: List[dict]) -> str:
 Today is {datetime.now():%B %d, %Y}.
 
 INSTRUCTIONS:
-1. Answer the question using ONLY the context provided below.
-2. Cite specific documents and dates when referencing information.
-3. If the context contains relevant information, provide a thorough, well-organized answer.
-4. If the context does NOT contain information to answer the question, say "The available Fed documents do not directly address this topic" — do NOT make up information or provide general knowledge.
-5. Never fabricate facts or cite external sources not in the context.
+1. Answer the question thoroughly using the context provided below.
+2. Synthesize information from multiple sources into a coherent, well-organized answer.
+3. Cite specific documents and dates when referencing information.
+4. If the context contains ANY relevant information — even partial or indirect — use it to construct the best possible answer.
+5. Draw reasonable inferences from the data when appropriate.
+6. NEVER say "the documents do not address this topic" if there IS relevant information in the context. Instead, present what IS available.
+7. Only say information is unavailable if the context is truly completely unrelated to the question.
 
 Context:
 {context_text}"""
