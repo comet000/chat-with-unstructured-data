@@ -15,6 +15,7 @@ from typing import List, Dict, Any
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import numpy as np
+import requests
 from snowflake.snowpark import Session
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
@@ -212,50 +213,52 @@ class CortexSearchRetriever:
 rag_retriever = CortexSearchRetriever(session)
 
 
-def extractive_answer(query: str, contexts: List[dict]) -> str:
-    stop_words = {'the', 'a', 'an', 'in', 'is', 'was', 'how', 'to', 'of', 'and',
-                  'for', 'on', 'with', 'that', 'it', 'are', 'be', 'this', 'at', 'by',
-                  'do', 'did', 'does', 'what', 'when', 'where', 'which', 'who', 'will'}
-    query_words = set(re.findall(r'\w+', query.lower())) - stop_words
+GROQ_API_KEY = st.secrets.get("groq_api_key", "")
 
-    all_sentences = []
-    for ctx in contexts:
+
+def groq_complete(query: str, contexts: List[dict]) -> str:
+    context_parts = []
+    for ctx in contexts[:5]:
         chunk = clean_chunk(ctx.get('chunk', ''))
-        sentences = re.split(r'(?<=[.!?])\s+', chunk)
-        for sent in sentences:
-            if len(sent.strip()) >= 40:
-                all_sentences.append((sent.strip(), ctx.get('file_name', '')))
+        title = extract_clean_title(ctx.get('file_name', ''))
+        context_parts.append(f"[Source: {title}]\n{chunk}")
 
-    scored = []
-    for sent, file_name in all_sentences:
-        sent_words = set(re.findall(r'\w+', sent.lower()))
-        overlap = len(query_words & sent_words)
-        score = overlap / max(len(query_words), 1)
-        scored.append((score, sent, file_name))
+    context_text = "\n\n---\n\n".join(context_parts)
+    if len(context_text) > 12000:
+        context_text = context_text[:12000]
 
-    scored.sort(key=lambda x: -x[0])
+    system_prompt = f"""You are an expert economic analyst specializing in Federal Reserve communications.
+Today is {datetime.now():%B %d, %Y}.
 
-    seen = set()
-    top = []
-    for score, sent, file_name in scored:
-        if score < 0.1:
-            break
-        normalized = re.sub(r'\s+', ' ', sent.lower()[:80])
-        if normalized not in seen:
-            seen.add(normalized)
-            top.append((sent, file_name))
-        if len(top) >= 8:
-            break
+Use ONLY the context below to answer the user's question. Cite sources naturally.
+If the context doesn't contain relevant information, say so clearly.
 
-    if not top:
-        return "No relevant information found in the available Federal Reserve documents for this query."
+Context:
+{context_text}"""
 
-    result_parts = []
-    for sent, file_name in top:
-        title = extract_clean_title(file_name)
-        result_parts.append(f"• {sent}\n  *— {title}*")
-
-    return "\n\n".join(result_parts)
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": query}
+                ],
+                "temperature": 0.3,
+                "max_tokens": 1024
+            },
+            timeout=30
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        logging.error(f"Groq API error: {e}")
+        return f"Error generating response: {e}"
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -313,12 +316,12 @@ def run_query(user_query: str):
         progress_bar = st.progress(0, text="Retrieving context from Federal Reserve records...")
 
         contexts = retrieve_cached(user_query)
-        progress_bar.progress(50, text="Extracting relevant information...")
+        progress_bar.progress(30, text="Generating response...")
 
         if not contexts:
             response_text = "No relevant documents found for this query. Please try rephrasing or check https://www.federalreserve.gov."
         else:
-            response_text = extractive_answer(user_query, contexts)
+            response_text = groq_complete(user_query, contexts)
 
         progress_bar.progress(100, text="Complete!")
         time.sleep(0.3)
