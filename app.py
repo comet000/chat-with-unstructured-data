@@ -135,6 +135,7 @@ def build_tfidf_model():
             st.error("DEBUG: No chunks found in CHUNKED_FOMC_CONTENT table. Check table access for streamlit_readonly_role.")
             return None, None
     except Exception as e:
+        st.session_state["_debug_tfidf_error"] = str(e)
         st.error(f"DEBUG: Failed to load chunks: {e}")
         return None, None
 
@@ -226,7 +227,7 @@ class CortexSearchRetriever:
 
         except Exception as e:
             logging.error(f"Retrieval error: {e}")
-            st.error(f"DEBUG Retrieval error: {e}")
+            st.session_state["_debug_retrieval_error"] = str(e)
             return []
 
 rag_retriever = CortexSearchRetriever(session)
@@ -448,3 +449,11 @@ for question in example_questions:
         st.session_state.messages.append({"role": "user", "content": question, "contexts": []})
         run_query(question)
         st.rerun()
+
+with st.sidebar.expander("🐛 Debug Info", expanded=True):
+    st.write(f"TF-IDF model loaded: {tfidf_vectorizer is not None}")
+    st.write(f"Session type: {type(session)}")
+    if "_debug_retrieval_error" in st.session_state:
+        st.error(f"Last retrieval error: {st.session_state['_debug_retrieval_error']}")
+    if "_debug_tfidf_error" in st.session_state:
+        st.error(f"TF-IDF error: {st.session_state['_debug_tfidf_error']}")
